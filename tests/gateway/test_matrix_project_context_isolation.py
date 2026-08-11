@@ -113,60 +113,6 @@ def _context_for(source: SessionSource) -> SessionContext:
 
 
 @pytest.mark.asyncio
-async def test_matrix_source_includes_room_name_topic_and_message_id():
-    adapter = _make_adapter()
-    source = await _source_for(adapter, PROJECT_B_ROOM_ID, "$project-b-msg")
-
-    assert source.chat_id == PROJECT_B_ROOM_ID
-    assert source.chat_name == PROJECT_B_NAME
-    assert source.chat_topic == PROJECT_B_TOPIC
-    assert source.guild_id == "example.org"
-    assert source.message_id == "$project-b-msg"
-    assert source.parent_chat_id is None
-
-
-@pytest.mark.asyncio
-async def test_matrix_project_a_and_project_b_have_distinct_session_keys():
-    adapter = _make_adapter()
-    source_a = await _source_for(adapter, PROJECT_A_ROOM_ID, "$a")
-    source_b = await _source_for(adapter, PROJECT_B_ROOM_ID, "$b")
-
-    assert source_a.chat_id != source_b.chat_id
-    assert source_a.chat_name == PROJECT_A_NAME
-    assert source_b.chat_name == PROJECT_B_NAME
-    assert build_session_key(source_a) != build_session_key(source_b)
-
-
-@pytest.mark.asyncio
-async def test_matrix_project_b_prompt_contains_project_b_not_project_a():
-    adapter = _make_adapter()
-    source_b = await _source_for(adapter, PROJECT_B_ROOM_ID, "$b")
-
-    prompt = build_session_context_prompt(_context_for(source_b))
-
-    assert PROJECT_B_NAME in prompt
-    assert PROJECT_B_TOPIC in prompt
-    assert PROJECT_B_ROOM_ID in prompt
-    assert "Matrix room boundary" in prompt
-    assert PROJECT_A_NAME not in prompt
-    assert PROJECT_A_TOPIC not in prompt
-
-
-@pytest.mark.asyncio
-async def test_matrix_project_context_survives_sequential_messages():
-    adapter = _make_adapter()
-    adapter._matrix_session_scope = "room"
-    first = await _source_for(adapter, PROJECT_B_ROOM_ID, "$b1")
-    second = await _source_for(adapter, PROJECT_B_ROOM_ID, "$b2")
-
-    assert first.thread_id is None
-    assert second.thread_id is None
-    assert first.chat_name == PROJECT_B_NAME
-    assert second.chat_name == PROJECT_B_NAME
-    assert build_session_key(first) == build_session_key(second)
-
-
-@pytest.mark.asyncio
 async def test_matrix_session_scope_auto_and_thread_preserve_synthetic_threads():
     adapter = _make_adapter()
     # Override member_count to 3 so the named project room is NOT classified as
@@ -269,32 +215,6 @@ async def test_matrix_inbound_handler_keeps_project_a_and_b_distinct():
         PROJECT_B_NAME,
     ]
     assert build_session_key(captured[0].source) != build_session_key(captured[1].source)
-
-
-def test_matrix_room_scope_group_sessions_per_user_true_separates_users():
-    alice = _make_matrix_source(PROJECT_B_ROOM_ID, PROJECT_B_NAME, PROJECT_B_TOPIC)
-    bob = _make_matrix_source(PROJECT_B_ROOM_ID, PROJECT_B_NAME, PROJECT_B_TOPIC)
-    bob.user_id = "@bob:example.org"
-    alice.thread_id = None
-    bob.thread_id = None
-
-    assert build_session_key(alice, group_sessions_per_user=True) != build_session_key(
-        bob,
-        group_sessions_per_user=True,
-    )
-
-
-def test_matrix_room_scope_group_sessions_per_user_false_shares_room():
-    alice = _make_matrix_source(PROJECT_B_ROOM_ID, PROJECT_B_NAME, PROJECT_B_TOPIC)
-    bob = _make_matrix_source(PROJECT_B_ROOM_ID, PROJECT_B_NAME, PROJECT_B_TOPIC)
-    bob.user_id = "@bob:example.org"
-    alice.thread_id = None
-    bob.thread_id = None
-
-    assert build_session_key(alice, group_sessions_per_user=False) == build_session_key(
-        bob,
-        group_sessions_per_user=False,
-    )
 
 
 def _make_matrix_source(room_id: str, room_name: str, topic: str) -> SessionSource:

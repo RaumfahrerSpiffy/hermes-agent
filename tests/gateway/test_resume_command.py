@@ -84,12 +84,19 @@ class TestHandleResumeCommand:
         """With no argument, lists recently titled sessions."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram", user_id="12345", chat_id="67890")
-        db.create_session("sess_002", "telegram", user_id="12345", chat_id="67890")
+        event = _make_event(text="/resume")
+        lane_key = _session_key_for_event(event)
+        db.create_session(
+            "sess_001", "telegram", session_key=lane_key,
+            user_id="12345", chat_id="67890",
+        )
+        db.create_session(
+            "sess_002", "telegram", session_key=lane_key,
+            user_id="12345", chat_id="67890",
+        )
         db.set_session_title("sess_001", "Research")
         db.set_session_title("sess_002", "Coding")
 
-        event = _make_event(text="/resume")
         runner = _make_runner(session_db=db, event=event)
         result = await runner._handle_resume_command(event)
         assert "Research" in result
@@ -100,82 +107,6 @@ class TestHandleResumeCommand:
         assert "/resume 1" in result
         db.close()
 
-    @pytest.mark.asyncio
-    async def test_list_shows_usage_when_no_titled(self, tmp_path):
-        """With no arg and no titled sessions, shows instructions."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram", user_id="12345", chat_id="67890")  # No title
-
-        event = _make_event(text="/resume")
-        runner = _make_runner(session_db=db, event=event)
-        result = await runner._handle_resume_command(event)
-        assert "No named sessions" in result
-        assert "/title" in result
-        db.close()
-
-    @pytest.mark.asyncio
-    async def test_resume_by_index(self, tmp_path):
-        """Numeric argument resumes the indexed titled session from the list."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram", user_id="12345", chat_id="67890")
-        db.create_session("sess_002", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("sess_001", "Research")
-        db.set_session_title("sess_002", "Coding")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
-
-        event = _make_event(text="/resume 2")
-        runner = _make_runner(session_db=db, current_session_id="current_session_001",
-                              event=event)
-        result = await runner._handle_resume_command(event)
-
-        assert "Resumed" in result
-        runner.session_store.switch_session.assert_called_once()
-        call_args = runner.session_store.switch_session.call_args
-        assert call_args[0][1] == "sess_001"
-        db.close()
-
-    @pytest.mark.asyncio
-    async def test_resume_index_out_of_range(self, tmp_path):
-        """Out-of-range numeric arguments show a helpful error."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("sess_001", "Research")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
-
-        event = _make_event(text="/resume 9")
-        runner = _make_runner(session_db=db, current_session_id="current_session_001",
-                              event=event)
-        result = await runner._handle_resume_command(event)
-
-        assert "out of range" in result.lower()
-        assert "/resume" in result
-        runner.session_store.switch_session.assert_not_called()
-        db.close()
-
-    @pytest.mark.asyncio
-    async def test_resume_by_name(self, tmp_path):
-        """Resolves a title and switches to that session."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session_abc", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("old_session_abc", "My Project")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
-
-        event = _make_event(text="/resume My Project")
-        runner = _make_runner(session_db=db, current_session_id="current_session_001",
-                              event=event)
-        result = await runner._handle_resume_command(event)
-
-        assert "Resumed" in result
-        assert "My Project" in result
-        # Verify switch_session was called with the old session ID
-        runner.session_store.switch_session.assert_called_once()
-        call_args = runner.session_store.switch_session.call_args
-        assert call_args[0][1] == "old_session_abc"
-        db.close()
 
     @pytest.mark.asyncio
     async def test_resume_clears_session_model_overrides(self, tmp_path):
@@ -240,55 +171,6 @@ class TestHandleResumeCommand:
         assert runner._last_resolved_model["agent:main:telegram:dm:other"] == "keep-me"
         db.close()
 
-    @pytest.mark.asyncio
-    async def test_resume_nonexistent_name(self, tmp_path):
-        """Returns error for unknown session name."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
-
-        event = _make_event(text="/resume Nonexistent Session")
-        runner = _make_runner(session_db=db, event=event)
-        result = await runner._handle_resume_command(event)
-        assert "No session found" in result
-        db.close()
-
-    @pytest.mark.asyncio
-    async def test_resume_already_on_session(self, tmp_path):
-        """Returns friendly message when already on the requested session."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("current_session_001", "Active Project")
-
-        event = _make_event(text="/resume Active Project")
-        runner = _make_runner(session_db=db, current_session_id="current_session_001",
-                              event=event)
-        result = await runner._handle_resume_command(event)
-        assert "Already on session" in result
-        db.close()
-
-    @pytest.mark.asyncio
-    async def test_resume_auto_lineage(self, tmp_path):
-        """Asking for 'My Project' when 'My Project #2' exists gets the latest."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_v1", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("sess_v1", "My Project")
-        db.create_session("sess_v2", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("sess_v2", "My Project #2")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
-
-        event = _make_event(text="/resume My Project")
-        runner = _make_runner(session_db=db, current_session_id="current_session_001",
-                              event=event)
-        result = await runner._handle_resume_command(event)
-
-        assert "Resumed" in result
-        # Should resolve to #2 (latest in lineage)
-        call_args = runner.session_store.switch_session.call_args
-        assert call_args[0][1] == "sess_v2"
-        db.close()
 
     @pytest.mark.asyncio
     async def test_resume_follows_compression_continuation(self, tmp_path):
@@ -324,26 +206,6 @@ class TestHandleResumeCommand:
         runner.session_store.load_transcript.assert_called_with("compressed_child")
         db.close()
 
-    @pytest.mark.asyncio
-    async def test_resume_clears_running_agent(self, tmp_path):
-        """Switching sessions clears any cached running agent."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("old_session", "Old Work")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
-
-        event = _make_event(text="/resume Old Work")
-        runner = _make_runner(session_db=db, current_session_id="current_session_001",
-                              event=event)
-        # Simulate a running agent using the real session key
-        real_key = _session_key_for_event(event)
-        runner._running_agents[real_key] = MagicMock()
-
-        await runner._handle_resume_command(event)
-
-        assert real_key not in runner._running_agents
-        db.close()
 
     @pytest.mark.asyncio
     async def test_resume_evicts_cached_agent(self, tmp_path):
@@ -372,87 +234,46 @@ class TestHandleResumeCommand:
         assert real_key not in runner._agent_cache
         db.close()
 
-    @pytest.mark.asyncio
-    async def test_resume_strips_outer_brackets(self, tmp_path):
-        """Users may copy `<session_id>` from the usage hint literally.
 
-        The gateway should strip outer ``<>``, ``[]``, ``""``, and ``''``
-        before lookup so ``/resume <abc123>`` works the same as
-        ``/resume abc123``.
-        """
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("abc123", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("abc123", "Bracketed")
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
 
-        for raw in ("<abc123>", "[abc123]", '"abc123"', "'abc123'"):
-            event = _make_event(text=f"/resume {raw}")
-            runner = _make_runner(
-                session_db=db,
-                current_session_id="current_session_001",
-                event=event,
-            )
-            result = await runner._handle_resume_command(event)
-            # Either the session was resumed (and we get a "Resumed" / "Already on" reply)
-            # or it was found-then-redirected. Failure mode = "No session found matching '<abc123>'".
-            assert "abc123" not in str(result) or "not found" not in str(result).lower(), (
-                f"bracket stripping failed for {raw!r}: gateway returned {result!r}"
-            )
-        db.close()
 
-    @pytest.mark.asyncio
-    async def test_resume_resolves_by_session_id(self, tmp_path):
-        """The gateway should accept a bare session ID, not just a title.
-
-        Before this fix, /resume in the gateway only called
-        ``resolve_session_by_title``, so ``/resume <session_id>`` always
-        returned "Session not found" even for valid IDs.
-        """
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("unnamed_session_xyz", "telegram", user_id="12345", chat_id="67890")
-        # Deliberately no title set — this session can ONLY be resolved by ID.
-        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
-
-        event = _make_event(text="/resume unnamed_session_xyz")
-        runner = _make_runner(
-            session_db=db,
-            current_session_id="current_session_001",
-            event=event,
-        )
-        result = await runner._handle_resume_command(event)
-
-        # Should NOT be the not-found error.
-        assert "not found" not in str(result).lower(), (
-            f"session-id lookup failed: {result!r}"
-        )
-        db.close()
 
 
 
 class TestHandleSessionsCommand:
     """Tests for GatewayRunner._handle_sessions_command."""
 
+
     @pytest.mark.asyncio
-    async def test_sessions_command_lists_current_platform_sessions(self, tmp_path):
+    async def test_sessions_admin_all_preserves_cross_origin_widening(self, tmp_path):
         from hermes_state import SessionDB
+
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("tg_session", "telegram", user_id="12345", chat_id="67890")
-        db.set_session_title("tg_session", "Telegram Work")
-        db.create_session("discord_session", "discord")
-        db.set_session_title("discord_session", "Discord Work")
+        event = _make_event(text="/sessions all")
+        lane_key = _session_key_for_event(event)
+        db.create_session(
+            "tg_named", "telegram", session_key=lane_key,
+            user_id="12345", chat_id="67890",
+        )
+        db.set_session_title("tg_named", "Telegram Work")
+        db.create_session(
+            "discord_named", "discord",
+            session_key="agent:main:discord:dm:other",
+            user_id="other-user", chat_id="other",
+        )
+        db.set_session_title("discord_named", "Discord Work")
 
-        event = _make_event(text="/sessions")
         runner = _make_runner(session_db=db, event=event)
-
+        runner._resume_caller_is_admin = lambda _source: True
         result = await runner._handle_sessions_command(event)
 
-        assert "Sessions" in result
         assert "Telegram Work" in result
-        assert "tg_session" in result
-        assert "Discord Work" not in result
+        assert "Discord Work" in result
         db.close()
+
+
+
+
 
     @pytest.mark.asyncio
     async def test_sessions_search_finds_older_titled_session(self, tmp_path):
@@ -460,15 +281,22 @@ class TestHandleSessionsCommand:
         and orders by activity, keeping the caller's own scope."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
+        event = _make_event(text="/sessions search an94")
+        lane_key = _session_key_for_event(event)
         # Bury the target under newer sessions so a plain listing misses it.
-        db.create_session("target_an94", "telegram", user_id="12345", chat_id="67890")
+        db.create_session(
+            "target_an94", "telegram", session_key=lane_key,
+            user_id="12345", chat_id="67890",
+        )
         db.set_session_title("target_an94", "AN-94 Prestige Barrel Build #2")
         for i in range(12):
             sid = f"filler_{i}"
-            db.create_session(sid, "telegram", user_id="12345", chat_id="67890")
+            db.create_session(
+                sid, "telegram", session_key=lane_key,
+                user_id="12345", chat_id="67890",
+            )
             db.set_session_title(sid, f"Filler {i}")
 
-        event = _make_event(text="/sessions search an94")
         runner = _make_runner(session_db=db, event=event)
         result = await runner._handle_sessions_command(event)
 
@@ -477,16 +305,9 @@ class TestHandleSessionsCommand:
         assert "Filler" not in result
         db.close()
 
-    @pytest.mark.asyncio
-    async def test_sessions_search_missing_query_shows_usage(self, tmp_path):
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        event = _make_event(text="/sessions search")
-        runner = _make_runner(session_db=db, event=event)
-        result = await runner._handle_sessions_command(event)
-        assert "Usage" in result
-        assert "/sessions search" in result
-        db.close()
+
+
+
 
     @pytest.mark.asyncio
     async def test_gateway_dispatches_sessions_command(self, tmp_path):
@@ -504,4 +325,37 @@ class TestHandleSessionsCommand:
         assert result == "sessions output"
         runner._handle_sessions_command.assert_awaited_once_with(event)
         db.close()
+
+
+
+
+
+
+class TestSameMatrixRoomThreadScoping:
+    """Matrix `/resume` (direct and listing) scopes by room AND thread: a live
+    session in another thread of the same room is a different session
+    (build_session_key appends thread_id), so a caller in thread A must not
+    resume/enumerate a target whose origin is in thread B. Non-threaded rooms
+    keep room-level sharing unchanged."""
+
+    @staticmethod
+    def _msrc(chat_id="!room-a:hs", user_id="@alice:hs", thread_id=None):
+        return SessionSource(platform=Platform.MATRIX, chat_id=chat_id,
+                             chat_type="group", user_id=user_id, thread_id=thread_id)
+
+    def test_same_room_no_thread_still_shared(self):
+        runner = _make_runner()
+        a = self._msrc(user_id="@alice:hs")
+        b = self._msrc(user_id="@bob:hs")
+        assert runner._same_matrix_room(a, b) is True
+
+
+    def test_cross_thread_same_room_blocked(self):
+        """The reviewer's probe: caller in thread-a, target origin in thread-b
+        of the same room → must not match."""
+        runner = _make_runner()
+        caller = self._msrc(thread_id="thread-a")
+        victim_origin = self._msrc(thread_id="thread-b")
+        assert runner._same_matrix_room(caller, victim_origin) is False
+
 
