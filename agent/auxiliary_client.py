@@ -1981,9 +1981,21 @@ class _AnthropicCompletionsAdapter:
         #     et al.), never wire fields.
         caller_extra_body = kwargs.get("extra_body")
         if caller_extra_body and isinstance(caller_extra_body, dict):
+            #   - ``response_format`` (native Anthropic only): OpenAI-style
+            #     structured-output field. The native Messages API rejects
+            #     unknown top-level body keys with 400 "Extra inputs are not
+            #     permitted", which killed e.g. the title-generation fallback
+            #     from nous to the main anthropic model. Anthropic-COMPATIBLE
+            #     gateways (custom base_url) still receive it — they may honor
+            #     it, and callers already tolerate providers that ignore it.
+            _native_anthropic = (
+                not self._base_url
+                or "api.anthropic.com" in str(self._base_url)
+            )
             passthrough = {
                 k: v for k, v in caller_extra_body.items()
                 if k != "reasoning" and not str(k).startswith("_")
+                and not (_native_anthropic and k == "response_format")
             }
             if passthrough:
                 existing = anthropic_kwargs.get("extra_body") or {}
