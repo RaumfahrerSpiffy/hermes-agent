@@ -73,6 +73,8 @@ from typing import Any, Dict, Optional, Set
 
 from agent.secret_scope import UnscopedSecretError, get_secret
 
+from .glyph_flags import leads_with_machine_marker, rewrite_glyph_flags
+
 try:
     from mautrix.types import (
         ContentURI,
@@ -2210,12 +2212,19 @@ class MatrixAdapter(BasePlatformAdapter):
         if not content:
             return SendResult(success=True)
 
+        # Machine-provenance typing (fork-only, Mercury): lines that lead
+        # with a known event emoji are automated output — sent as m.notice
+        # (the spec's bot-emission msgtype) so clients can render them as
+        # machine chatter, not speech. Classified on the ORIGINAL content,
+        # BEFORE format_message strips the emoji into chain tokens.
+        msgtype = "m.notice" if leads_with_machine_marker(content) else "m.text"
+
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.max_message_length)
 
         last_event_id = None
         for i, chunk in enumerate(chunks):
-            msg_content = self._build_text_message_content(chunk)
+            msg_content = self._build_text_message_content(chunk, msgtype=msgtype)
 
             self._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
 
@@ -2345,10 +2354,15 @@ class MatrixAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Edit an existing message (via m.replace)."""
 
+        # Same machine-provenance typing as send(): pure function of the
+        # content, so every edit of a streamed message classifies the same
+        # way and the msgtype never flips mid-stream.
+        msgtype = "m.notice" if leads_with_machine_marker(content) else "m.text"
+
         formatted = self.format_message(content)
-        new_content = self._build_text_message_content(formatted)
+        new_content = self._build_text_message_content(formatted, msgtype=msgtype)
         msg_content: Dict[str, Any] = {
-            "msgtype": "m.text",
+            "msgtype": msgtype,
             "body": f"* {formatted}",
             "m.new_content": new_content,
         }
@@ -2872,6 +2886,13 @@ class MatrixAdapter(BasePlatformAdapter):
         """Pass-through — Matrix supports standard Markdown natively."""
         # Strip image markdown; media is uploaded separately.
         content = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\2", content)
+        # Fork-only (Mercury): rewrite line-leading event/tool emoji to
+        # 1403-chain flag tokens (GO/NOGO/HOLD/READ/EXEC/**/...). This is
+        # the single outbound chokepoint — send() and edit_message() both
+        # route through here — so tool bubbles, lifecycle notices, and
+        # slash-command reports all convert in one place. Doctrine + map:
+        # glyph_flags.py.
+        content = rewrite_glyph_flags(content)
         return content
 
     # ------------------------------------------------------------------
