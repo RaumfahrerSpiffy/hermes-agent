@@ -31,6 +31,26 @@ from __future__ import annotations
 GLYPH_FLAGS: dict[str, str] = {
     # -- lifecycle notices (gateway/run.py, slash_commands.py) --------------
     "\u23f3": "**",    # ⏳ working / queued
+    "\u2728": "NEW",   # ✨ session reset / new session (was unmapped → reset
+                       #    notices classified m.text and wore MERCURY; 2026-08-19)
+    "\u2726": "/",     # ✦ tip line (reset-notice footer; note class like 💭 —
+                       #   body already reads "Tip: ...", a TIP token would stutter)
+    "\u25c6": "\u25c6",  # ◆ config/report bullet — IDENTITY: the lozenge is one
+                         #   of the 1403 chain's twelve specials, already period-
+                         #   pure; mapping it only marks the line as machine
+    "\u2139": "INFO",  # ℹ info / advisory
+    "\u21a9": "UNDO",  # ↩ undo
+    "\u21bb": "RECYC", # ↻ session resumed (matches ♻)
+    "\u2299": "GOAL",  # ⊙ goal set
+    "\u2442": "FORK",  # ⑂ session branched
+    "\u270f": "TITLE", # ✏ session title set
+    "\u2796": "DEL",   # ➖ removed ("-" would read as a markdown list bullet)
+    "\U0001f3ad": "PERS",  # 🎭 personality
+    "\U0001f464": "PROF",  # 👤 profile
+    "\U0001f4c2": "FILE",  # 📂 profile home dir
+    "\U0001f4cc": "PIN",   # 📌 pinned / current session
+    "\U0001f4ce": "NOTE",  # 📎 runtime footer
+    "\U0001f916": "AGENT", # 🤖 active agents report
     "\u2705": "GO",    # ✅ success
     "\u274c": "NOGO",  # ❌ failure
     "\u26d4": "NOGO",  # ⛔ refused
@@ -57,6 +77,13 @@ GLYPH_FLAGS: dict[str, str] = {
     "\u2795": "&",     # ➕ added (& is on the chain)
     "\U0001f44d": "GO",    # 👍 approve
     "\U0001f44e": "NOGO",  # 👎 deny
+    # -- exec-approval prompt legend (matrix adapter itself, ~line 2697) ----
+    # Scope grammar (Peter 2026-08-19): GO = once, single-letter scope suffix
+    # for wider grants. GO-1 was considered and rejected — a numeral suffix
+    # reads as a COUNT ("go once"), colliding with plain GO's meaning.
+    "\U0001f300": "GO-S",  # 🌀 approve for this session
+    "\u267e": "GO-A",      # ♾ approve always / permanently
+    "\u274e": "NOGO",      # ❎ deny (matches ❌/⛔/✗)
     # -- slash-command report chrome (slash_commands.py, account_usage.py) --
     "\u2713": "GO",    # ✓ confirmations ("✓ paused", "✓ gate removed")
     "\u2714": "GO",    # ✔ heavy check
@@ -76,12 +103,40 @@ GLYPH_FLAGS: dict[str, str] = {
     "\U0001f50d": "SRCH",  # 🔍 web_search
     "\U0001f50e": "SRCH",  # 🔎 search_files
     "\U0001f4da": "READ",  # 📚 skill_view
-    "\U0001f310": "@",     # 🌐 web / browser
+    "\U0001f310": "WEB",   # 🌐 web / browser (was "@"; remapped 2026-08-19 so the
+                           #    tool class never collides with 🔌/🔄 connect "@")
     "\U0001f3a8": "IMG",   # 🎨 image_generate
     "\U0001f3ac": "FILM",  # 🎬 video tools
     "\U0001f441": "SCAN",  # 👁 vision_analyze
-    "\u26a1": "**",        # ⚡ generic tool / code execution
-    "\U0001f9e0": "/",     # 🧠 memory/reasoning tools
+    "\u26a1": "**",        # ⚡ DUAL-USE — interrupt/busy ack (gateway/run.py, a
+                           #    working notice: amber **) AND the registry's
+                           #    fallback emoji for tools with no registered emoji
+                           #    (registry.py get_emoji default). The notice class
+                           #    wins: briefly remapped to CALL 2026-08-19, which
+                           #    turned the interrupt ack's amber ** into a cyan
+                           #    CALL badge on glass — reverted same day (Peter).
+                           #    Cost: an UNREGISTERED-emoji tool bubble headers
+                           #    SYSTEM, not CALL. Acceptable; registered tools
+                           #    all carry their own mapped emoji.
+    "\U0001f9e0": "MEM",   # 🧠 memory/reasoning tools (was "/"; own tool token)
+    "\U0001f40d": "EXEC",  # 🐍 execute_code (code_execution_tool.py — the one
+                           #    Peter caught on glass 2026-08-19; registry swept
+                           #    same day for the rest of this section)
+    "\U0001f500": "DELEG", # 🔀 delegate_task batch
+    "\U0001f4f8": "IMG",   # 📸 browser screenshot
+    "\U0001f446": "WEB",   # 👆 browser click
+    "\u2328": "WEB",       # ⌨ browser type
+    "\U0001f4dc": "WEB",   # 📜 browser scroll
+    "\u25c0": "WEB",       # ◀ browser back
+    "\U0001f5bc": "IMG",   # 🖼 image preview / browser frame
+    "\U0001f9ea": "WEB",   # 🧪 browser CDP probe
+    "\U0001f5a5": "EXEC",  # 🖥 terminal pane read/close
+    "\U0001fa9f": "SCAN",  # 🪟 window read/focus
+    "\U0001f440": "SCAN",  # 👀 kanban watch
+    "\U0001f493": "HB",    # 💓 kanban heartbeat
+    "\U0001f517": "@",     # 🔗 kanban link (link/connect class)
+    "\U0001f49b": "ACK",   # 💛 react_to_message (acknowledgment)
+    "\U0001f510": "GATE",  # 🔐 crypto/verification notice (matrix adapter)
     "\U0001f4dd": "EDIT",  # 📝 todo/notes
     "\U0001f4c4": "READ",  # 📄 documents
     # -- toolset labels (hermes_cli/tools_config.py; surface in /usage) -----
