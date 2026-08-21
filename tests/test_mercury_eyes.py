@@ -126,3 +126,30 @@ def test_no_hardcoded_resolution_anywhere():
         )
         for tok in banned:
             assert tok not in body, f"{f.name} hardcodes {tok}"
+
+
+# --- Task 3: degenerate-frame detector --------------------------------------
+
+
+def test_blank_frame_is_degenerate(tmp_path):
+    from PIL import Image
+    from tools.mercury_eyes.capture import frame_stats, is_degenerate
+    p = tmp_path / "blank.png"
+    Image.new("RGB", (640, 480), (255, 255, 255)).save(p)
+    s = frame_stats(str(p))
+    assert s["unique_colours"] == 1
+    assert s["lum_std"] < 1e-9  # float32 accumulation: ~3e-14, not exactly 0.0
+    ok, reasons = is_degenerate(s)
+    assert ok is True and reasons
+
+
+def test_noise_frame_is_usable(tmp_path):
+    import numpy as np
+    from PIL import Image
+    from tools.mercury_eyes.capture import frame_stats, is_degenerate
+    p = tmp_path / "noise.png"
+    a = (np.random.rand(480, 640, 3) * 255).astype("uint8")
+    Image.fromarray(a).save(p)
+    s = frame_stats(str(p))
+    ok, _ = is_degenerate(s)
+    assert ok is False
