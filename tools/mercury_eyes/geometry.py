@@ -140,20 +140,14 @@ def _kscreen_phys():
     return km[0] if km else None
 
 
-def _atspi_logical():
-    """LOGICAL from the largest AT-SPI toplevel frame.
-
-    TRAP: the AT-SPI root desktop reports a hardcoded stub, not the display.
-    A real toplevel frame (shell desktop, locker greeter) reports true
-    logical extents. Portable to any AT-SPI desktop including GNOME Shell.
-    """
+def _atspi_toplevels():
+    """Every AT-SPI toplevel frame as (x, y, w, h). Needs gi; raises without it."""
     import gi
     gi.require_version("Atspi", "2.0")
     from gi.repository import Atspi
 
     d = Atspi.get_desktop(0)
-    best = None
-    best_area = 0
+    frames = []
     for i in range(d.get_child_count()):
         app = d.get_child_at_index(i)
         if app is None:
@@ -166,11 +160,93 @@ def _atspi_logical():
                 continue
             if e.width <= 2 or e.height <= 2:
                 continue
-            area = e.width * e.height
-            if area > best_area:
-                best_area = area
-                best = (e.width, e.height)
-    return best
+            frames.append((e.x, e.y, e.width, e.height))
+    return frames
+
+
+def _atspi_logical():
+    """LOGICAL from the largest AT-SPI toplevel frame.
+
+    TRAP: the AT-SPI root desktop reports a hardcoded stub, not the display.
+    A real toplevel frame (shell desktop, locker greeter) reports true
+    logical extents. Portable to any AT-SPI desktop including GNOME Shell.
+    """
+    frames = _atspi_toplevels()
+    if not frames:
+        return None
+    return max(frames, key=lambda f: f[2] * f[3])[2:]
+
+
+def classify_origin_space(frames, logical, physical, scale, tol=2):
+    """Decide whether AT-SPI element ORIGINS are physical or logical pixels.
+
+    The two hypotheses differ by the scale factor on any edge-anchored
+    surface, so a single panel or dock discriminates them:
+
+      origins logical:  panel bottom edge  y + h          == logical height
+      origins physical: panel bottom edge  y + h * scale  == physical height
+                        (sizes are logical under BOTH hypotheses -- that half
+                        is settled; only the origin space is in question)
+
+    frames: list of (x, y, w, h) toplevel extents.
+    Returns {"origin_space": "logical"|"physical"|"equivalent"|"unknown",
+             "evidence": [str, ...]}.
+
+    "unknown" is a decision, not a failure: it means the visible frames
+    carried no discriminating signal, or contradicted each other. Callers
+    must treat it as refuse-to-guess.
+    """
+    if abs(scale - 1.0) < 1e-9:
+        return {"origin_space": "equivalent",
+                "evidence": ["scale == 1.0: physical and logical coincide"]}
+
+    lw, lh = logical
+    pw, ph = physical
+    ptol = tol * scale  # rounding grows with the scale factor
+    votes = set()
+    evidence = []
+
+    for (x, y, w, h) in frames:
+        # Bottom-edge anchor (a top-anchored frame at y=0 carries no signal).
+        if y > 0:
+            if abs((y + h) - lh) <= tol:
+                votes.add("logical")
+                evidence.append(
+                    f"frame ({x},{y} {w}x{h}): y+h={y + h} == logical_h")
+            elif abs((y + h * scale) - ph) <= ptol:
+                votes.add("physical")
+                evidence.append(
+                    f"frame ({x},{y} {w}x{h}): y+h*scale={y + h * scale:.1f}"
+                    f" == physical_h")
+        # Right-edge anchor.
+        if x > 0:
+            if abs((x + w) - lw) <= tol:
+                votes.add("logical")
+                evidence.append(
+                    f"frame ({x},{y} {w}x{h}): x+w={x + w} == logical_w")
+            elif abs((x + w * scale) - pw) <= ptol:
+                votes.add("physical")
+                evidence.append(
+                    f"frame ({x},{y} {w}x{h}): x+w*scale={x + w * scale:.1f}"
+                    f" == physical_w")
+
+    if len(votes) == 1:
+        return {"origin_space": votes.pop(), "evidence": evidence}
+    if len(votes) > 1:
+        return {"origin_space": "unknown",
+                "evidence": ["conflicting anchors:"] + evidence}
+    return {"origin_space": "unknown",
+            "evidence": ["no edge-anchored frame carried a signal"]}
+
+
+def _calibrated_origin_space(logical, physical, scale):
+    """Classify from live AT-SPI frames; 'unknown' when the bus is out of reach."""
+    try:
+        frames = _atspi_toplevels()
+    except Exception:
+        return {"origin_space": "unknown",
+                "evidence": ["AT-SPI unreachable from this interpreter"]}
+    return classify_origin_space(frames, logical, physical, scale)
 
 
 def _kscreen_logical():
@@ -237,6 +313,8 @@ def probe(use_cache=True):
         logical = physical
     scale = physical[0] / logical[0] if logical[0] else 1.0
 
+    origin = _calibrated_origin_space(logical, physical, scale)
+
     value = {
         "physical": physical,
         "logical": logical,
@@ -244,7 +322,8 @@ def probe(use_cache=True):
         "physical_source": p_src,
         "logical_source": l_src,
         "confidence": "assumed" if assumed else "measured",
-        "origin_space": "unknown",  # calibrated by Task 1b
+        "origin_space": origin["origin_space"],
+        "origin_evidence": origin["evidence"],
         "probed_at": time.time(),
     }
     _cache["at"] = time.monotonic()
