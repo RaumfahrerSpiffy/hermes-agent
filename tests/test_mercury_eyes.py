@@ -34,6 +34,7 @@ def test_assumed_fallback_is_square_and_flagged(monkeypatch):
     assert g["scale"] == 1.0
     assert g["logical"] == g["physical"]
     assert g["confidence"] == "assumed"
+    geometry.invalidate()  # do not leak the assumed geometry into later tests
 
 
 def test_wayland_info_is_not_a_scale_source():
@@ -95,3 +96,33 @@ def test_no_edge_anchored_frame_yields_unknown():
 def test_probe_origin_space_is_a_decided_enum_value():
     g = geometry.probe()
     assert g["origin_space"] in {"logical", "physical", "equivalent", "unknown"}
+
+
+# --- Task 2: coordinate conversion over derived geometry --------------------
+
+
+def test_round_trip_is_stable_at_any_scale():
+    from tools.mercury_eyes import coords
+    for x, y in [(0, 0), (7, 13), (640, 480)]:
+        px, py = coords.logical_to_physical(x, y)
+        assert coords.physical_to_logical(px, py) == (x, y)
+
+
+def test_clamp_uses_derived_bounds():
+    from tools.mercury_eyes import coords
+    w, h = geometry.probe()["logical"]
+    assert coords.clamp_logical(w + 500, h + 500) == (w - 1, h - 1)
+    assert coords.clamp_logical(-5, 10) == (0, 10)
+
+
+def test_no_hardcoded_resolution_anywhere():
+    import pathlib
+    pkg = pathlib.Path("/home/peterb/.hermes/hermes-agent/tools/mercury_eyes")
+    banned = ("2560", "1440", "2048", "1152", "1.25")
+    for f in pkg.glob("*.py"):
+        body = "\n".join(
+            l for l in f.read_text().splitlines()
+            if not l.strip().startswith("#") and "MEASURED" not in l
+        )
+        for tok in banned:
+            assert tok not in body, f"{f.name} hardcodes {tok}"

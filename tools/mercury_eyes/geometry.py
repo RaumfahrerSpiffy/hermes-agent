@@ -7,7 +7,7 @@ MEASURED TRAPS (2026-08-21, do not regress):
   * kscreen-doctor -j exposes `size` = PHYSICAL and has NO `geometry` key.
     Logical = size / scale.
   * The wl_output info tool reports integer scale (2) where the real
-    fractional scale was 1.25. Never a scale source.
+    fractional scale was 1.25 (MEASURED). Never a scale source.
   * Atspi.get_desktop(0).get_extents() returns a hardcoded stub.
     Use a real toplevel frame instead.
   * The portal returns a blank frame under the screen locker, but its
