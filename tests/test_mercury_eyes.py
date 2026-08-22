@@ -334,3 +334,96 @@ def test_cursor_outside_logical_bounds_is_flagged(monkeypatch):
     assert obs["ok"] is False
     assert obs["pos"] == (w + 100, h + 50)   # raw reading still reported
     assert "bounds" in obs["reason"]
+
+
+# --- Task 7: verified click --------------------------------------------------
+# The heart of the contract: clamp -> move -> ASSERT cursor within tolerance
+# -> click -> return the observation. Refuses to click off-target (failures
+# #2/#4: the 0.8x mis-scale plus the fabricated explanation it invited).
+
+
+def _wire_act(monkeypatch, cursor_at=None, move_log=None, click_log=None):
+    """Stub the device seam and cursor readback; return the act module."""
+    from tools.mercury_eyes import act
+
+    class FakeDevice:
+        def move(self, x, y):
+            if move_log is not None:
+                move_log.append((x, y))
+
+        def click_button(self, button, count):
+            if click_log is not None:
+                click_log.append((button, count))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(act, "_open_pointer", lambda: FakeDevice())
+    if cursor_at is not None:
+        monkeypatch.setattr(
+            act.pointer, "cursor_pos",
+            lambda: {"ok": True, "pos": cursor_at, "probed_at": 1.0})
+    return act
+
+
+def test_click_on_target_fires_and_reports_observation(monkeypatch):
+    clicks = []
+    act = _wire_act(monkeypatch, cursor_at=(400, 300), click_log=clicks)
+    r = act.click(400, 300)
+    assert r["clicked"] is True
+    assert r["on_target"] is True
+    assert r["commanded"] == (400, 300)
+    assert r["observed"] == (400, 300)
+    assert r["delta"] == (0, 0)
+    assert clicks == [("left", 1)]
+    assert r["probed_at"] > 0
+
+
+def test_click_refuses_when_cursor_off_target(monkeypatch):
+    # commanded (400,300), cursor lands 20px off -> REFUSE, report delta
+    clicks = []
+    act = _wire_act(monkeypatch, cursor_at=(420, 300), click_log=clicks)
+    r = act.click(400, 300)
+    assert r["clicked"] is False
+    assert r["on_target"] is False
+    assert r["delta"] == (20, 0)
+    assert clicks == []                       # no blind click fired
+    assert "refus" in r["reason"].lower()
+
+
+def test_click_refuses_when_cursor_unreadable(monkeypatch):
+    clicks = []
+    act = _wire_act(monkeypatch, click_log=clicks)
+    monkeypatch.setattr(
+        act.pointer, "cursor_pos",
+        lambda: {"ok": False, "pos": None, "probed_at": 1.0,
+                 "reason": "kwin unavailable"})
+    r = act.click(400, 300)
+    assert r["clicked"] is False
+    assert clicks == []
+    assert "cursor" in r["reason"].lower()
+
+
+def test_click_unverified_mode_reports_honestly(monkeypatch):
+    # verify=False fires without the assert but the result SAYS so —
+    # dispatched-not-verified, never dressed as a confirmed click
+    clicks = []
+    act = _wire_act(monkeypatch, click_log=clicks)
+    monkeypatch.setattr(
+        act.pointer, "cursor_pos",
+        lambda: {"ok": False, "pos": None, "probed_at": 1.0, "reason": "x"})
+    r = act.click(400, 300, verify=False)
+    assert r["clicked"] is True
+    assert r["on_target"] is None             # not asserted, not claimed
+    assert clicks == [("left", 1)]
+
+
+def test_click_clamps_offscreen_target(monkeypatch):
+    from tools.mercury_eyes import geometry
+    w, h = geometry.probe()["logical"]
+    moves = []
+    act = _wire_act(monkeypatch, cursor_at=(w - 1, h - 1), move_log=moves)
+    r = act.click(w + 500, h + 500)
+    assert r["commanded"] == (w - 1, h - 1)   # clamped, visibly
+    assert moves == [(w - 1, h - 1)]
+    assert r["clicked"] is True
