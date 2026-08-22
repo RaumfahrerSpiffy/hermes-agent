@@ -427,3 +427,81 @@ def test_click_clamps_offscreen_target(monkeypatch):
     assert r["commanded"] == (w - 1, h - 1)   # clamped, visibly
     assert moves == [(w - 1, h - 1)]
     assert r["clicked"] is True
+
+
+# --- Task 8: wait_until with Chromium poll fallback --------------------------
+# Replaces every blind sleep(N). Qt/GTK: AT-SPI push events (~117 ms measured,
+# spike 002). Chromium/CEF: emits ZERO events (measured: 0 in 40 s during an
+# active 30 GB download) — silent poll fallback. Callers must NOT need to know
+# which app is Chromium.
+
+
+def test_matcher_is_substring_and_case_insensitive():
+    from tools.mercury_eyes import events
+    assert events._matches("kcalc", "frame", "KCalc",
+                           app_w="KCALC", name_w="kcal", role_w="frame")
+    assert not events._matches("kcalc", "frame", "KCalc", app_w="steam")
+    assert not events._matches("kcalc", "frame", "KCalc", role_w="dialog")
+    assert events._matches("anything", "x", "y")   # no criteria = match all
+
+
+def test_event_path_wins_when_events_fire(monkeypatch):
+    from tools.mercury_eyes import events
+    monkeypatch.setattr(
+        events, "_event_wait",
+        lambda app, name, role, timeout: {"ms": 117.0,
+                                          "desc": "kcalc/frame 'KCalc'"})
+    r = events.wait_until(name="KCalc", timeout=5.0)
+    assert r["matched"] is True
+    assert r["method"] == "event"
+    assert r["element"]["ms"] == 117.0       # helper's own detection latency
+    assert r["ms"] < 2000.0                  # wall clock: no poll-path stall
+    assert r["probed_at"] > 0
+
+
+def test_poll_fallback_catches_eventless_surface(monkeypatch):
+    # event path returns nothing (Chromium), poll sees a matching new frame
+    from tools.mercury_eyes import events
+    monkeypatch.setattr(events, "_event_wait",
+                        lambda app, name, role, timeout: None)
+    frames = [{"app": "steamwebhelper", "name": "", "role": "frame",
+               "geom": [300, 200, 400, 300], "kids": 2}]
+    monkeypatch.setattr(events.surfaces, "surfaces",
+                        lambda: {"frames": frames, "probed_at": 1.0,
+                                 "origin_space": "logical"})
+    r = events.wait_until(app="steamwebhelper", timeout=1.0,
+                          poll_interval=0.1)
+    assert r["matched"] is True
+    assert r["method"] == "poll"
+    assert r["element"]["app"] == "steamwebhelper"
+
+
+def test_timeout_is_honest(monkeypatch):
+    from tools.mercury_eyes import events
+    monkeypatch.setattr(events, "_event_wait",
+                        lambda app, name, role, timeout: None)
+    monkeypatch.setattr(events.surfaces, "surfaces",
+                        lambda: {"frames": [], "probed_at": 1.0,
+                                 "origin_space": "logical"})
+    r = events.wait_until(name="NeverAppears", timeout=0.3,
+                          poll_interval=0.1)
+    assert r["matched"] is False
+    assert r["method"] == "timeout"
+    assert r["ms"] >= 300.0
+    assert "timeout" in r["reason"].lower()
+
+
+def test_poll_matches_unnamed_frame_by_app(monkeypatch):
+    # failure #3's shape: UNNAMED dialog — matchable by app + role alone
+    from tools.mercury_eyes import events
+    monkeypatch.setattr(events, "_event_wait",
+                        lambda app, name, role, timeout: None)
+    frames = [{"app": "steam", "name": "", "role": "dialog",
+               "geom": [500, 300, 600, 400], "kids": 5}]
+    monkeypatch.setattr(events.surfaces, "surfaces",
+                        lambda: {"frames": frames, "probed_at": 1.0,
+                                 "origin_space": "logical"})
+    r = events.wait_until(app="steam", role="dialog", timeout=1.0,
+                          poll_interval=0.1)
+    assert r["matched"] is True
+    assert r["element"]["name"] == ""
