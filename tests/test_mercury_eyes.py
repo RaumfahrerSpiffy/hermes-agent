@@ -221,3 +221,75 @@ def test_capture_reports_portal_failure_honestly(tmp_path, monkeypatch):
     r = capture.capture(out=str(tmp_path / "out.png"))
     assert r["usable"] is False
     assert any("portal" in reason for reason in r["reasons"])
+
+
+# --- Task 5: surface inventory + geometry diff -------------------------------
+# Failure #3: the redeem wizard opened as an UNNAMED frame and a named-node
+# diff missed it for 30 minutes. The diff below keys on (app, geometry), so a
+# new rectangle is a new surface whether or not it has a name.
+
+
+def _fr(app, name, geom, role="frame", kids=1):
+    return {"app": app, "name": name, "role": role, "geom": list(geom),
+            "kids": kids}
+
+
+def test_unnamed_dialog_appears_in_diff():
+    from tools.mercury_eyes import surfaces
+    before = [_fr("steam", "Steam", (10, 10, 800, 600))]
+    after = before + [_fr("steam", "", (300, 200, 400, 300), role="dialog")]
+    d = surfaces.diff_surfaces(before, after)
+    assert len(d["new"]) == 1
+    assert d["new"][0]["name"] == ""      # unnamed is still caught
+    assert d["gone"] == []
+
+
+def test_closed_surface_appears_as_gone():
+    from tools.mercury_eyes import surfaces
+    before = [_fr("kcalc", "KCalc", (0, 0, 400, 500)),
+              _fr("kcalc", "", (100, 100, 200, 150), role="dialog")]
+    after = [before[0]]
+    d = surfaces.diff_surfaces(before, after)
+    assert d["new"] == []
+    assert len(d["gone"]) == 1 and d["gone"][0]["role"] == "dialog"
+
+
+def test_moved_surface_is_new_plus_gone():
+    # keying on (app, geom): a moved window reads as one new + one gone —
+    # documented behavior, not a bug; callers correlate by app if needed.
+    from tools.mercury_eyes import surfaces
+    before = [_fr("dolphin", "Home", (0, 0, 640, 480))]
+    after = [_fr("dolphin", "Home", (60, 40, 640, 480))]
+    d = surfaces.diff_surfaces(before, after)
+    assert len(d["new"]) == 1 and len(d["gone"]) == 1
+
+
+def test_identical_inventories_diff_empty():
+    from tools.mercury_eyes import surfaces
+    frames = [_fr("plasmashell", "Desktop", (0, 0, 2000, 1000)),
+              _fr("plasmashell", "", (0, 940, 2000, 60), role="panel")]
+    d = surfaces.diff_surfaces(frames, frames)
+    assert d == {"new": [], "gone": []}
+
+
+def test_surfaces_returns_observation_with_timestamp(monkeypatch):
+    # freshness contract (failure #6): every observation carries probed_at
+    from tools.mercury_eyes import surfaces
+    monkeypatch.setattr(
+        surfaces, "_enumerate_frames",
+        lambda: [_fr("kcalc", "KCalc", (0, 0, 400, 500))])
+    obs = surfaces.surfaces()
+    assert obs["frames"][0]["app"] == "kcalc"
+    assert obs["probed_at"] > 0
+
+
+def test_surfaces_stub_filter(monkeypatch):
+    # Steam emits 3x1 stubs; frames <= 2px in either axis are noise
+    from tools.mercury_eyes import surfaces
+    monkeypatch.setattr(
+        surfaces, "_enumerate_frames",
+        lambda: [_fr("steam", "", (0, 0, 3, 1)),
+                 _fr("steam", "Steam", (10, 10, 800, 600))])
+    obs = surfaces.surfaces()
+    assert len(obs["frames"]) == 1
+    assert obs["frames"][0]["name"] == "Steam"
