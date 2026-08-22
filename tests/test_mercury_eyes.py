@@ -1,6 +1,8 @@
 """MercuryEyes tests. Invariants and provenance only — never this monitor's numbers."""
 import sys
 
+import pytest
+
 sys.path.insert(0, "/home/peterb/.hermes/hermes-agent")
 
 from tools.mercury_eyes import geometry  # noqa: E402
@@ -505,3 +507,121 @@ def test_poll_matches_unnamed_frame_by_app(monkeypatch):
                           poll_interval=0.1)
     assert r["matched"] is True
     assert r["element"]["name"] == ""
+
+
+# --- Task 9: session guard ---------------------------------------------------
+# Input needs an unlocked session; the screen must ALWAYS re-lock. The guard
+# verifies the unlock actually took (loginctl alone leaves the KDE greeter up)
+# and restores the prior state in a finally — a crash mid-task must not leave
+# the machine unlocked.
+
+
+class _FakeSession:
+    """Scriptable stand-in for the real screen-state calls."""
+
+    def __init__(self, active=True, unlock_works=True):
+        self.active = active
+        self.unlock_works = unlock_works
+        self.calls = []
+
+    def get_active(self):
+        self.calls.append("get")
+        return self.active
+
+    def set_active(self, value):
+        self.calls.append(f"set:{value}")
+        if value is False and not self.unlock_works:
+            return          # greeter stays up — the measured KDE trap
+        self.active = value
+
+
+def _wire_session(monkeypatch, fake):
+    from tools.mercury_eyes import session
+    monkeypatch.setattr(session, "_screensaver_active", fake.get_active)
+    monkeypatch.setattr(session, "_set_screensaver", fake.set_active)
+    return session
+
+
+def test_unlocked_yields_only_after_verifying(monkeypatch):
+    fake = _FakeSession(active=True)
+    session = _wire_session(monkeypatch, fake)
+    seen = {}
+    with session.unlocked() as state:
+        seen["inside"] = fake.active
+        seen["state"] = state
+    assert seen["inside"] is False          # genuinely unlocked before body ran
+    assert seen["state"]["unlocked"] is True
+    assert seen["state"]["was_active"] is True
+
+
+def test_relock_happens_even_on_exception(monkeypatch):
+    fake = _FakeSession(active=True)
+    session = _wire_session(monkeypatch, fake)
+    try:
+        with session.unlocked():
+            assert fake.active is False
+            raise RuntimeError("task blew up mid-flight")
+    except RuntimeError:
+        pass
+    assert fake.active is True              # restored despite the exception
+
+
+def test_refuses_when_unlock_does_not_take(monkeypatch):
+    # loginctl/SetActive can report success while the greeter stays up —
+    # verify by read-back and REFUSE rather than act blind
+    fake = _FakeSession(active=True, unlock_works=False)
+    session = _wire_session(monkeypatch, fake)
+    with pytest.raises(session.UnlockFailed) as exc:
+        with session.unlocked():
+            raise AssertionError("body must not run on a failed unlock")
+    assert "verif" in str(exc.value).lower()
+
+
+def test_already_unlocked_session_is_left_alone(monkeypatch):
+    # reads work while locked and must NOT unlock; an already-unlocked
+    # session must not be re-locked on exit (we did not lock it)
+    fake = _FakeSession(active=False)
+    session = _wire_session(monkeypatch, fake)
+    with session.unlocked() as state:
+        assert state["was_active"] is False
+    assert fake.active is False             # left as we found it
+    assert "set:True" not in fake.calls
+
+
+def test_sigterm_during_guard_still_relocks(tmp_path):
+    # MEASURED 2026-08-21: default SIGTERM handling terminates the process
+    # WITHOUT running `finally` — a systemctl restart mid-task left the
+    # screen unlocked. The guard traps kill signals; this pins that shut.
+    import signal
+    import subprocess
+    import sys as _sys
+    import textwrap
+
+    state_file = tmp_path / "lockstate"
+    state_file.write_text("locked")
+    script = tmp_path / "guarded.py"
+    script.write_text(textwrap.dedent(f"""
+        import sys, time
+        sys.path.insert(0, "/home/peterb/.hermes/hermes-agent")
+        from tools.mercury_eyes import session
+        P = {str(state_file)!r}
+        session._screensaver_active = lambda: open(P).read().strip() == "locked"
+        session._set_screensaver = lambda v: open(P, "w").write(
+            "locked" if v else "unlocked")
+        session._loginctl = lambda verb: None
+        with session.unlocked():
+            print("BODY", flush=True)
+            time.sleep(30)
+    """))
+
+    proc = subprocess.Popen([_sys.executable, str(script)],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "BODY"
+        assert state_file.read_text().strip() == "unlocked"
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert state_file.read_text().strip() == "locked"
