@@ -281,7 +281,7 @@ def test_surfaces_returns_observation_with_timestamp(monkeypatch):
     from tools.mercury_eyes import surfaces
     monkeypatch.setattr(
         surfaces, "_enumerate_frames",
-        lambda: [_fr("kcalc", "KCalc", (0, 0, 400, 500))])
+        lambda: ([_fr("kcalc", "KCalc", (0, 0, 400, 500))], None))
     obs = surfaces.surfaces()
     assert obs["frames"][0]["app"] == "kcalc"
     assert obs["probed_at"] > 0
@@ -292,8 +292,8 @@ def test_surfaces_stub_filter(monkeypatch):
     from tools.mercury_eyes import surfaces
     monkeypatch.setattr(
         surfaces, "_enumerate_frames",
-        lambda: [_fr("steam", "", (0, 0, 3, 1)),
-                 _fr("steam", "Steam", (10, 10, 800, 600))])
+        lambda: ([_fr("steam", "", (0, 0, 3, 1)),
+                  _fr("steam", "Steam", (10, 10, 800, 600))], None))
     obs = surfaces.surfaces()
     assert len(obs["frames"]) == 1
     assert obs["frames"][0]["name"] == "Steam"
@@ -773,3 +773,278 @@ def test_tool_is_registered_with_the_expected_surface():
     assert verbs == {"look", "surfaces", "wait", "click", "type", "key",
                      "cursor"}
     assert fn["parameters"]["required"] == ["action"]
+
+
+# --- DPMS: the blank frame that was NOT a lock ------------------------------
+# MEASURED 2026-08-22, calibrated against the commander's on-site observation
+# ("dark sleeping monitor, no prompt"): the session was UNLOCKED the whole
+# time. GetActive=false, LockedHint=no and no kscreenlocker_greet were all
+# CORRECT readings. The blank frame was the output in DPMS power-save.
+#
+# `kscreen-doctor --dpms show` -> "dpms mode for screen DP-1: off" is the
+# probe that agrees with his eyes. The reference implementation
+# (agent-sh/computer-use-linux) has no DPMS handling at all — its only blank
+# check is `bytes.is_empty()`, which a valid 15KB black PNG passes.
+
+
+def test_dpms_state_is_read_from_kscreen_doctor(monkeypatch):
+    from tools.mercury_eyes import capture
+
+    def _fake_run(cmd, **kw):
+        assert "kscreen-doctor" in cmd[0]
+        assert "--dpms" in cmd and "show" in cmd
+        return type("R", (), {"returncode": 0, "stdout": "dpms mode for screen DP-1: off\n", "stderr": ""})()
+
+    monkeypatch.setattr(capture.subprocess, "run", _fake_run)
+    state = capture.dpms_state()
+    assert state["asleep"] is True
+    assert "DP-1" in str(state["outputs"])
+
+
+def test_dpms_state_reports_awake_when_on(monkeypatch):
+    from tools.mercury_eyes import capture
+    monkeypatch.setattr(capture.subprocess, "run",
+                        lambda cmd, **kw: type("R", (), {
+                            "returncode": 0,
+                            "stdout": "dpms mode for screen DP-1: on\n",
+                            "stderr": ""})())
+    assert capture.dpms_state()["asleep"] is False
+
+
+def test_dpms_state_unreadable_is_none_not_false(monkeypatch):
+    # absence of signal is NOT evidence of an awake display
+    from tools.mercury_eyes import capture
+    monkeypatch.setattr(capture.subprocess, "run",
+                        lambda cmd, **kw: (_ for _ in ()).throw(OSError("no kscreen-doctor")))
+    state = capture.dpms_state()
+    assert state["asleep"] is None
+    assert state["reason"]
+
+
+def test_wake_verifies_by_reading_dpms_back(monkeypatch):
+    from tools.mercury_eyes import capture
+    seen = []
+
+    def _fake_run(cmd, **kw):
+        seen.append(cmd)
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(capture.subprocess, "run", _fake_run)
+    # after the wake command, the state read must come back awake
+    states = iter([{"asleep": False, "outputs": {"DP-1": "on"}, "reason": None}])
+    monkeypatch.setattr(capture, "dpms_state", lambda: next(states))
+    obs = capture.wake()
+    assert obs["ok"] is True
+    assert obs["verified"] is True
+    assert any("--dpms" in c and "on" in c for c in seen)
+
+
+def test_wake_that_does_not_take_is_reported_as_failure(monkeypatch):
+    from tools.mercury_eyes import capture
+    monkeypatch.setattr(capture.subprocess, "run",
+                        lambda cmd, **kw: type("R", (), {
+                            "returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(capture, "dpms_state",
+                        lambda: {"asleep": True, "outputs": {"DP-1": "off"},
+                                 "reason": None})
+    obs = capture.wake()
+    assert obs["ok"] is False
+    assert obs["verified"] is False
+    assert "still" in obs["reason"].lower() or "asleep" in obs["reason"].lower()
+
+
+def test_degenerate_frame_triggers_wake_and_recapture(monkeypatch):
+    """A dark frame is diagnosed, not just refused."""
+    from tools.mercury_eyes import capture
+
+    grabs = iter([{"path": "/tmp/dark.png", "screensaver_active": False},
+                  {"path": "/tmp/real.png", "screensaver_active": False}])
+    monkeypatch.setattr(capture, "_portal_grab", lambda out: next(grabs))
+    stats = iter([
+        {"path": "/tmp/dark.png", "width": 2560, "height": 1440, "bytes": 15090,
+         "bytes_per_mp": 4093, "unique_colours": 4, "lum_std": 0.34,
+         "dominant_frac": 0.9999},
+        {"path": "/tmp/real.png", "width": 2560, "height": 1440,
+         "bytes": 900000, "bytes_per_mp": 244140, "unique_colours": 22000,
+         "lum_std": 61.2, "dominant_frac": 0.11},
+    ])
+    monkeypatch.setattr(capture, "frame_stats", lambda p: next(stats))
+    monkeypatch.setattr(capture, "dpms_state",
+                        lambda: {"asleep": True, "outputs": {"DP-1": "off"},
+                                 "reason": None})
+    monkeypatch.setattr(capture, "wake",
+                        lambda: {"ok": True, "verified": True, "reason": None})
+    monkeypatch.setattr(capture.geometry, "probe",
+                        lambda: {"logical": (2048, 1152),
+                                 "origin_space": "logical"})
+
+    r = capture.capture(out="/tmp/x.png", wake_if_dark=True)
+    assert r["usable"] is True
+    assert r["woke"] is True
+    assert "power save" in json.dumps(r).lower() or "dpms" in json.dumps(r).lower()
+
+
+def test_wake_is_not_attempted_on_a_healthy_frame(monkeypatch):
+    from tools.mercury_eyes import capture
+    monkeypatch.setattr(capture, "_portal_grab",
+                        lambda out: {"path": "/tmp/real.png",
+                                     "screensaver_active": False})
+    monkeypatch.setattr(capture, "frame_stats", lambda p: {
+        "path": "/tmp/real.png", "width": 2560, "height": 1440,
+        "bytes": 900000, "bytes_per_mp": 244140, "unique_colours": 22000,
+        "lum_std": 61.2, "dominant_frac": 0.11})
+    monkeypatch.setattr(capture.geometry, "probe",
+                        lambda: {"logical": (2048, 1152),
+                                 "origin_space": "logical"})
+    fired = []
+    monkeypatch.setattr(capture, "wake", lambda: fired.append(1))
+    r = capture.capture(out="/tmp/x.png", wake_if_dark=True)
+    assert r["usable"] is True
+    assert fired == [], "must not touch the display when the frame is fine"
+    assert r["woke"] is False
+
+
+def test_wake_can_be_declined(monkeypatch):
+    """wake_if_dark=False diagnoses without touching the user's display."""
+    from tools.mercury_eyes import capture
+    monkeypatch.setattr(capture, "_portal_grab",
+                        lambda out: {"path": "/tmp/dark.png",
+                                     "screensaver_active": False})
+    monkeypatch.setattr(capture, "frame_stats", lambda p: {
+        "path": "/tmp/dark.png", "width": 2560, "height": 1440, "bytes": 15090,
+        "bytes_per_mp": 4093, "unique_colours": 4, "lum_std": 0.34,
+        "dominant_frac": 0.9999})
+    monkeypatch.setattr(capture, "dpms_state",
+                        lambda: {"asleep": True, "outputs": {"DP-1": "off"},
+                                 "reason": None})
+    fired = []
+    monkeypatch.setattr(capture, "wake", lambda: fired.append(1))
+    monkeypatch.setattr(capture.geometry, "probe",
+                        lambda: {"logical": (2048, 1152),
+                                 "origin_space": "logical"})
+    r = capture.capture(out="/tmp/x.png", wake_if_dark=False)
+    assert r["usable"] is False
+    assert fired == []
+    assert r["woke"] is False
+    assert any("power save" in s.lower() or "dpms" in s.lower()
+               for s in r["reasons"]), r["reasons"]
+
+
+# --- surfaces must not import gi in-process ---------------------------------
+# MEASURED 2026-08-22: `screen surfaces` raised ModuleNotFoundError: No module
+# named 'gi' under the agent venv. pointer/events shell out to system python3;
+# surfaces did not. Task 10's tests stubbed surfaces.surfaces() and never
+# exercised the real path, so both `surfaces` and `wait` shipped broken.
+
+
+def test_surfaces_does_not_import_gi_in_the_agent_venv():
+    import ast
+    import pathlib
+    src = pathlib.Path(
+        "/home/peterb/.hermes/hermes-agent/tools/mercury_eyes/surfaces.py"
+    ).read_text()
+    # parse rather than grep: the docstring legitimately mentions the fix
+    tree = ast.parse(src)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    assert "gi" not in imported, (
+        "surfaces.py must shell out to system python3 like pointer/events; "
+        "the agent venv has no gi")
+
+
+def test_surfaces_enumerates_through_the_system_interpreter(monkeypatch):
+    from tools.mercury_eyes import surfaces
+    seen = {}
+
+    def _fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        payload = {"ok": True, "frames": [
+            {"app": "kcalc", "name": "KCalc", "role": "frame",
+             "geom": [10, 20, 400, 500], "kids": 3}]}
+        return type("R", (), {"returncode": 0, "stdout": json.dumps(payload),
+                              "stderr": ""})()
+
+    monkeypatch.setattr(surfaces.subprocess, "run", _fake_run)
+    monkeypatch.setattr(surfaces.geometry, "probe",
+                        lambda: {"origin_space": "logical"})
+    obs = surfaces.surfaces()
+    assert seen["cmd"][0] == surfaces._SYSTEM_PYTHON
+    assert len(obs["frames"]) == 1
+    assert obs["frames"][0]["app"] == "kcalc"
+    assert "probed_at" in obs
+
+
+def test_surfaces_helper_failure_is_honest_not_an_empty_list(monkeypatch):
+    # an empty inventory and a broken bus must NOT look identical
+    from tools.mercury_eyes import surfaces
+    monkeypatch.setattr(surfaces.subprocess, "run",
+                        lambda cmd, **kw: type("R", (), {
+                            "returncode": 1, "stdout": "",
+                            "stderr": "bus unreachable"})())
+    monkeypatch.setattr(surfaces.geometry, "probe",
+                        lambda: {"origin_space": "logical"})
+    obs = surfaces.surfaces()
+    assert obs.get("ok") is False
+    assert obs.get("error")
+    assert obs["frames"] == []
+
+
+def test_no_module_imports_gi_in_the_agent_venv():
+    """The whole class, not one file at a time.
+
+    MEASURED 2026-08-22: surfaces.py imported gi in-process and broke the
+    `surfaces`/`wait` verbs loudly. geometry.py had the SAME defect and was
+    missed, because its failure degraded QUIETLY — origin_space fell back to
+    "unknown", silently undoing Task 1b's calibration. Per-file checks let
+    the sibling through; this sweeps the package.
+    """
+    import ast
+    import pathlib
+    pkg = pathlib.Path(
+        "/home/peterb/.hermes/hermes-agent/tools/mercury_eyes")
+    offenders = []
+    for path in sorted(pkg.glob("*.py")):
+        if path.name.endswith("_helper.py"):
+            continue  # helpers RUN under system python3 — gi is correct there
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module.split(".")[0]]
+            if "gi" in names:
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, (
+        f"venv-side modules import gi: {offenders}. Shell out to "
+        f"/usr/bin/python3 via a *_helper.py instead.")
+
+
+def test_origin_space_is_decided_not_unknown_on_this_host(monkeypatch):
+    """Task 1b's calibration must survive running under the agent venv.
+
+    Regression: geometry._atspi_toplevels() raised ModuleNotFoundError in the
+    venv, the caller swallowed it, and every probe returned "unknown" — a
+    refuse-to-guess that looked like a considered decision.
+    """
+    from tools.mercury_eyes import geometry
+    # a bottom-anchored panel: y+h == logical height discriminates the spaces
+    monkeypatch.setattr(geometry, "_atspi_toplevels",
+                        lambda: [(0, 1090, 2048, 62)])
+    verdict = geometry.classify_origin_space(
+        geometry._atspi_toplevels(), (2048, 1152), (2560, 1440), 1.25)
+    assert verdict["origin_space"] == "logical"
+    assert verdict["evidence"]
+
+
+def test_origin_space_unknown_still_says_why(monkeypatch):
+    from tools.mercury_eyes import geometry
+    monkeypatch.setattr(geometry, "_atspi_toplevels",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no bus")))
+    out = geometry._calibrated_origin_space((2048, 1152), (2560, 1440), 1.25)
+    assert out["origin_space"] == "unknown"
+    assert out["evidence"], "unknown must always carry its reason"

@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import numpy as np
 from PIL import Image
@@ -27,6 +28,94 @@ MIN_BYTES_PER_MP = 20000     # below this the PNG compressed to nothing
 SCALE_TOLERANCE = 0.02       # spike 004: per-axis scale disagreement allowed
 _HELPER = os.path.join(os.path.dirname(__file__), "portal_helper.py")
 _SYSTEM_PYTHON = "/usr/bin/python3"  # has gi/dbus; the agent venv does not
+
+# --- DPMS ------------------------------------------------------------------
+# MEASURED 2026-08-22, calibrated against the commander's on-site observation
+# ("dark sleeping monitor, no prompt"): a blank portal frame on this host was
+# the output in DPMS POWER-SAVE, not a session lock. The session was unlocked
+# throughout; ScreenSaver.GetActive=false, LockedHint=no and the absence of
+# kscreenlocker_greet were all CORRECT readings that I misread as sensor
+# faults.
+#
+# `kscreen-doctor --dpms show` -> "dpms mode for screen DP-1: off" is the one
+# probe that agreed with his eyes, and it is read-only.
+#
+# The reference implementation (agent-sh/computer-use-linux, 15,910 lines of
+# Rust) has NO dpms/wake/lock handling at all: its only blank-frame check is
+# `bytes.is_empty()`, which a valid 15KB all-black PNG passes. It would have
+# returned that frame as a successful screenshot. There is no prior art to
+# borrow here.
+_KSCREEN_DOCTOR = "kscreen-doctor"
+WAKE_SETTLE_S = 1.2          # measured: the output needs a moment to present
+
+
+def dpms_state():
+    """Read display power state. READ-ONLY — never changes the display.
+
+    Returns {"asleep": True|False|None, "outputs": {name: mode},
+             "reason": str|None}.
+
+    asleep is None when unreadable — absence of signal is NOT evidence that
+    the display is awake, and callers must not treat it as such.
+    """
+    obs = {"asleep": None, "outputs": {}, "reason": None}
+    try:
+        r = subprocess.run([_KSCREEN_DOCTOR, "--dpms", "show"],
+                           capture_output=True, text=True, timeout=15)
+    except Exception as exc:
+        obs["reason"] = f"dpms unreadable: {type(exc).__name__}: {exc}"
+        return obs
+
+    if r.returncode != 0:
+        obs["reason"] = (f"kscreen-doctor --dpms show exited {r.returncode}: "
+                         f"{(r.stderr or '').strip()[:160]}")
+        return obs
+
+    # "dpms mode for screen DP-1: off"
+    for line in (r.stdout or "").splitlines():
+        if ":" not in line:
+            continue
+        head, _, mode = line.rpartition(":")
+        mode = mode.strip().lower()
+        name = head.strip().split()[-1] if head.strip() else "?"
+        if mode in ("on", "off", "standby", "suspend"):
+            obs["outputs"][name] = mode
+
+    if not obs["outputs"]:
+        obs["reason"] = "kscreen-doctor reported no dpms modes"
+        return obs
+
+    obs["asleep"] = any(m != "on" for m in obs["outputs"].values())
+    return obs
+
+
+def wake():
+    """Wake the display out of power-save, then VERIFY by reading back.
+
+    Returns {"ok": bool, "verified": bool, "reason": str|None, "state": ...}.
+    Never claims a wake it has not observed.
+    """
+    obs = {"ok": False, "verified": False, "reason": None, "state": None}
+    try:
+        subprocess.run([_KSCREEN_DOCTOR, "--dpms", "on"],
+                       capture_output=True, text=True, timeout=15)
+    except Exception as exc:
+        obs["reason"] = f"wake command failed: {type(exc).__name__}: {exc}"
+        return obs
+
+    time.sleep(WAKE_SETTLE_S)
+    state = dpms_state()
+    obs["state"] = state
+    if state["asleep"] is False:
+        obs["ok"] = True
+        obs["verified"] = True
+        return obs
+    if state["asleep"] is None:
+        obs["reason"] = (f"wake dispatched but state unreadable "
+                         f"({state['reason']}) — not verified")
+        return obs
+    obs["reason"] = "display still asleep after wake command"
+    return obs
 
 
 def frame_stats(path):
@@ -90,7 +179,7 @@ def _portal_grab(out):
             "screensaver_active": payload.get("screensaver_active")}
 
 
-def capture(out="/tmp/mercury_eye.png"):
+def capture(out="/tmp/mercury_eye.png", wake_if_dark=True):
     """Full-frame portal capture that refuses to return a lie.
 
     Returns a dict, always:
@@ -101,25 +190,63 @@ def capture(out="/tmp/mercury_eye.png"):
       scale             capture_w / logical_w when uniform
       stats             frame_stats() output
       screensaver_active  ScreenSaver.GetActive at grab time (None = unknown)
+      woke              True when a DPMS wake was performed for this capture
+      dpms              display power state when the first frame was dark
       reasons           why usable is False (never silent)
 
     Gates, in order: portal grab succeeded -> per-axis scale uniform
     (spike 004: rotation/panning otherwise maps clicks silently wrong) ->
     frame not degenerate (failure #5: a blank frame is not an observation).
+
+    When the frame IS degenerate, the display power state is read (read-only)
+    to DIAGNOSE the cause. If the output is in power-save and wake_if_dark is
+    True, the display is woken and the capture retried ONCE. With
+    wake_if_dark=False the cause is still reported but the display is left
+    untouched — diagnosis without side effects.
     """
     result = {"usable": False, "path": out, "physical": None, "logical": None,
               "scale": None, "stats": None, "screensaver_active": None,
-              "reasons": []}
+              "woke": False, "dpms": None, "reasons": []}
+
+    def _grab_and_measure(target):
+        grab = _portal_grab(target)
+        return grab, frame_stats(grab["path"])
 
     try:
-        grab = _portal_grab(out)
+        grab, stats = _grab_and_measure(out)
     except Exception as e:
         result["reasons"].append(f"portal capture failed: {e}")
         return result
+
+    degenerate, why = is_degenerate(stats)
+    if degenerate:
+        # A dark frame is a symptom. Find out WHY before reporting it —
+        # power-save and a genuinely blank desktop are different findings.
+        state = dpms_state()
+        result["dpms"] = state
+        if state["asleep"] is True:
+            if wake_if_dark:
+                woke = wake()
+                result["woke"] = bool(woke.get("ok"))
+                if woke.get("ok"):
+                    try:
+                        grab, stats = _grab_and_measure(out)
+                        degenerate, why = is_degenerate(stats)
+                    except Exception as e:
+                        result["reasons"].append(
+                            f"portal capture failed after wake: {e}")
+                        return result
+                else:
+                    result["reasons"].append(
+                        f"display in DPMS power save; wake failed: "
+                        f"{woke.get('reason')}")
+            else:
+                result["reasons"].append(
+                    "display is in DPMS power save (output off) — "
+                    "not woken (wake_if_dark=False)")
+
     result["path"] = grab["path"]
     result["screensaver_active"] = grab.get("screensaver_active")
-
-    stats = frame_stats(grab["path"])
     result["stats"] = stats
     result["physical"] = (stats["width"], stats["height"])
 
@@ -135,7 +262,6 @@ def capture(out="/tmp/mercury_eye.png"):
     else:
         result["scale"] = sx
 
-    degenerate, why = is_degenerate(stats)
     if degenerate:
         result["reasons"].extend(why)
 

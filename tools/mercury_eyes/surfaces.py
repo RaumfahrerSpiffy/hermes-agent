@@ -6,65 +6,72 @@ sees "a box appeared in the middle of the screen" regardless of whether it
 has a name. This module keys surfaces on (app, geometry), so a new rectangle
 IS a new surface, named or not.
 
-Enumeration reads AT-SPI toplevels (works while the screen is LOCKED); the
-diff is pure and needs no desktop at all.
+Enumeration runs under the SYSTEM python3 via surfaces_helper.py — the agent
+venv has no gi (MEASURED 2026-08-22: an in-process `import gi` raised
+ModuleNotFoundError and broke both the `surfaces` and `wait` verbs). The diff
+is pure and needs no desktop at all.
+
+Whether enumeration works while the screen is LOCKED is UNMEASURED. An
+earlier version of this docstring asserted it did; that claim was never
+tested and has been withdrawn.
 """
+import json
+import os
+import subprocess
 import time
 
 from . import geometry
 
 _MIN_DIM = 3  # Steam emits 3x1 stub frames; <=2px in either axis is noise
+_HELPER = os.path.join(os.path.dirname(__file__), "surfaces_helper.py")
+_SYSTEM_PYTHON = "/usr/bin/python3"  # has gi; the agent venv does not
 
 
 def _enumerate_frames():
-    """Every AT-SPI toplevel as {app, name, role, geom, kids}. Needs gi."""
-    import gi
-    gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi
+    """Every AT-SPI toplevel as {app, name, role, geom, kids}.
 
-    out = []
-    d = Atspi.get_desktop(0)
-    for i in range(d.get_child_count()):
-        a = d.get_child_at_index(i)
-        if a is None:
-            continue
-        try:
-            appn = a.get_name() or "?"
-            n = a.get_child_count()
-        except Exception:
-            continue
-        for j in range(n):
-            try:
-                f = a.get_child_at_index(j)
-                if f is None:
-                    continue
-                e = f.get_extents(Atspi.CoordType.SCREEN)
-                out.append({
-                    "app": appn,
-                    "name": (f.get_name() or ""),
-                    "role": f.get_role_name(),
-                    "geom": [e.x, e.y, e.width, e.height],
-                    "kids": f.get_child_count(),
-                })
-            except Exception:
-                continue
-    return out
+    Returns (frames, error). error is None on success; on failure frames is
+    empty AND error is set, so a broken bus never looks like an empty desktop.
+    """
+    try:
+        r = subprocess.run([_SYSTEM_PYTHON, _HELPER],
+                           capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+
+    line = (r.stdout.strip().splitlines() or [""])[-1]
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return [], (f"surfaces helper spoke no JSON (exit {r.returncode}): "
+                    f"{r.stderr.strip()[:200]}")
+    if not payload.get("ok"):
+        return [], str(payload.get("error") or "helper reported failure")
+    return payload.get("frames", []), None
 
 
 def surfaces():
     """Current surface inventory as an OBSERVATION.
 
-    Returns {"frames": [...], "probed_at": epoch, "origin_space": ...}.
+    Returns {"frames": [...], "probed_at": epoch, "origin_space": ...,
+             "ok": bool, "error": str|None}.
+
     Geometry is in the space geometry.probe()["origin_space"] names —
     measured LOGICAL on this host, re-decided per machine.
 
     Freshness contract (failure #6): probed_at rides every observation so a
     stale inventory can never be silently passed off as current.
+
+    Honesty contract: a helper failure returns ok=False with the reason. An
+    empty desktop and an unreachable bus must never look identical.
     """
-    frames = [f for f in _enumerate_frames()
+    raw, error = _enumerate_frames()
+    frames = [f for f in raw
               if f["geom"][2] >= _MIN_DIM and f["geom"][3] >= _MIN_DIM]
     return {
         "frames": frames,
+        "ok": error is None,
+        "error": error,
         "probed_at": time.time(),
         "origin_space": geometry.probe()["origin_space"],
     }

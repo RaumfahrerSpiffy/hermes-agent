@@ -38,62 +38,37 @@ def _portal_size():
 
     Empirical and compositor-agnostic: this IS the space captures come back
     in, so measuring it removes a whole class of disagreement. Dimensions are
-    correct even when the frame is degenerate (locked screen).
+    correct even when the frame is degenerate (dark/blank).
+
+    Runs through portal_helper.py under the SYSTEM python3 — the agent venv
+    has no gi/dbus. MEASURED 2026-08-22: this function previously did an
+    in-process `import gi` + `import dbus`, so under the venv it raised and
+    was silently skipped, dropping the most authoritative PHYSICAL source
+    from the derivation ladder. It also duplicated capture.py's portal
+    plumbing; that duplication is now removed in favour of the one helper.
     """
-    import gi
-    gi.require_version("GLib", "2.0")
-    from gi.repository import GLib
-    import dbus
-    import dbus.mainloop.glib
+    import json
+    import subprocess
+    import tempfile
 
-    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    bus = dbus.SessionBus()
-    obj = bus.get_object("org.freedesktop.portal.Desktop",
-                         "/org/freedesktop/portal/desktop")
-    shot = dbus.Interface(obj, "org.freedesktop.portal.Screenshot")
-    sender = bus.get_unique_name()[1:].replace(".", "_")
-    token = f"mercury_geom_{os.getpid()}"
-    path = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
-
-    loop = GLib.MainLoop()
-    result = {}
-
-    def on_response(code, results):
-        result["code"] = int(code)
-        result["results"] = dict(results)
-        loop.quit()
-
-    bus.add_signal_receiver(on_response,
-                            signal_name="Response",
-                            dbus_interface="org.freedesktop.portal.Request",
-                            path=path)
-    shot.Screenshot("", {"handle_token": token,
-                         "interactive": dbus.Boolean(False),
-                         "modal": dbus.Boolean(False)})
-
-    def bail():
-        result.setdefault("code", -1)
-        loop.quit()
-        return False
-
-    GLib.timeout_add_seconds(20, bail)
-    loop.run()
-
-    if result.get("code") != 0:
-        return None
-    uri = str(result.get("results", {}).get("uri", ""))
-    if not uri:
-        return None
-    src = uri.replace("file://", "")
+    helper = os.path.join(os.path.dirname(__file__), "portal_helper.py")
+    out = os.path.join(tempfile.gettempdir(), f"mercury_geom_{os.getpid()}.png")
     try:
-        with open(src, "rb") as f:
-            size = _png_size(f.read())
+        r = subprocess.run(["/usr/bin/python3", helper, out],
+                           capture_output=True, text=True, timeout=45)
+        line = (r.stdout.strip().splitlines() or [""])[-1]
+        payload = json.loads(line)
+        if not payload.get("ok"):
+            return None
+        with open(payload["path"], "rb") as f:
+            return _png_size(f.read())
+    except Exception:
+        return None
     finally:
         try:
-            os.unlink(src)  # portal drops it in ~/Pictures; do not litter
+            os.unlink(out)
         except OSError:
             pass
-    return size
 
 
 def _drm_size():
@@ -141,26 +116,36 @@ def _kscreen_phys():
 
 
 def _atspi_toplevels():
-    """Every AT-SPI toplevel frame as (x, y, w, h). Needs gi; raises without it."""
-    import gi
-    gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi
+    """Every AT-SPI toplevel frame as (x, y, w, h).
 
-    d = Atspi.get_desktop(0)
+    Runs under the SYSTEM python3 via surfaces_helper.py — the agent venv has
+    no gi. MEASURED 2026-08-22: this function previously did an in-process
+    `import gi`, which raised ModuleNotFoundError under the venv. The caller
+    caught it and returned origin_space="unknown" with the evidence string
+    "AT-SPI unreachable from this interpreter" — silently undoing Task 1b's
+    LOGICAL calibration on every probe. Same defect as surfaces.py had; this
+    module was missed because its failure degraded quietly instead of raising.
+
+    Raises on helper failure so the caller's existing except-branch still
+    reports "unknown" honestly rather than inventing a decision.
+    """
+    import json
+    import subprocess
+
+    helper = os.path.join(os.path.dirname(__file__), "surfaces_helper.py")
+    r = subprocess.run(["/usr/bin/python3", helper],
+                       capture_output=True, text=True, timeout=30)
+    line = (r.stdout.strip().splitlines() or [""])[-1]
+    payload = json.loads(line)
+    if not payload.get("ok"):
+        raise RuntimeError(payload.get("error") or "surfaces helper failed")
+
     frames = []
-    for i in range(d.get_child_count()):
-        app = d.get_child_at_index(i)
-        if app is None:
+    for f in payload.get("frames", []):
+        x, y, w, h = f["geom"]
+        if w <= 2 or h <= 2:
             continue
-        for j in range(app.get_child_count()):
-            w = app.get_child_at_index(j)
-            try:
-                e = w.get_extents(Atspi.CoordType.SCREEN)
-            except Exception:
-                continue
-            if e.width <= 2 or e.height <= 2:
-                continue
-            frames.append((e.x, e.y, e.width, e.height))
+        frames.append((x, y, w, h))
     return frames
 
 
