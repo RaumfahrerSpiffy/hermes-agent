@@ -293,3 +293,44 @@ def test_surfaces_stub_filter(monkeypatch):
     obs = surfaces.surfaces()
     assert len(obs["frames"]) == 1
     assert obs["frames"][0]["name"] == "Steam"
+
+
+# --- Task 6: cursor readback -------------------------------------------------
+# Compositor-truth pointer position. The KWin script's print() is unreachable;
+# the value rides a private DBus callback object (spike 004 pattern) — no
+# clipboard clobber. Failure #2/#4: without this readback, a mis-scaled click
+# lands silently wrong and invites fabricated explanations.
+
+
+def test_cursor_pos_is_an_observation(monkeypatch):
+    from tools.mercury_eyes import pointer
+    monkeypatch.setattr(pointer, "_query_cursor", lambda: (412, 388))
+    obs = pointer.cursor_pos()
+    assert obs["ok"] is True
+    assert obs["pos"] == (412, 388)
+    assert obs["probed_at"] > 0
+
+
+def test_cursor_failure_is_honest_not_silent(monkeypatch):
+    from tools.mercury_eyes import pointer
+
+    def boom():
+        raise RuntimeError("kwin scripting unavailable")
+
+    monkeypatch.setattr(pointer, "_query_cursor", boom)
+    obs = pointer.cursor_pos()
+    assert obs["ok"] is False
+    assert obs["pos"] is None
+    assert "kwin" in obs["reason"].lower()
+
+
+def test_cursor_outside_logical_bounds_is_flagged(monkeypatch):
+    # a reading outside the derived desktop means the coordinate space is
+    # wrong (the 0.8x bug's signature) — flag it, never pass it through
+    from tools.mercury_eyes import pointer, geometry
+    w, h = geometry.probe()["logical"]
+    monkeypatch.setattr(pointer, "_query_cursor", lambda: (w + 100, h + 50))
+    obs = pointer.cursor_pos()
+    assert obs["ok"] is False
+    assert obs["pos"] == (w + 100, h + 50)   # raw reading still reported
+    assert "bounds" in obs["reason"]
