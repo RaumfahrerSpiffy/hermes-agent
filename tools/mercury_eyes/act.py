@@ -126,3 +126,150 @@ def click(x, y, button="left", count=1, verify=True):
         return obs
     finally:
         dev.close()
+
+
+# --- keyboard ---------------------------------------------------------------
+# HONESTY NOTE: there is no compositor readback for keystrokes the way there is
+# for the cursor. We can assert the device was created and the events were
+# written, and nothing more. So these verbs report DISPATCHED, never "typed
+# successfully" — the caller is expected to confirm the effect by looking
+# (screen look / surfaces) if the outcome matters. Reporting a keystroke as
+# landed without evidence would be exactly the fabrication click() exists to
+# prevent.
+
+_SHIFTED = {
+    "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7",
+    "*": "8", "(": "9", ")": "0", "_": "MINUS", "+": "EQUAL", "{": "LEFTBRACE",
+    "}": "RIGHTBRACE", "|": "BACKSLASH", ":": "SEMICOLON", '"': "APOSTROPHE",
+    "<": "COMMA", ">": "DOT", "?": "SLASH", "~": "GRAVE",
+}
+_PUNCT = {
+    "-": "MINUS", "=": "EQUAL", "[": "LEFTBRACE", "]": "RIGHTBRACE",
+    "\\": "BACKSLASH", ";": "SEMICOLON", "'": "APOSTROPHE", ",": "COMMA",
+    ".": "DOT", "/": "SLASH", "`": "GRAVE", " ": "SPACE", "\n": "ENTER",
+    "\t": "TAB",
+}
+_MODIFIERS = {"ctrl": "KEY_LEFTCTRL", "control": "KEY_LEFTCTRL",
+              "alt": "KEY_LEFTALT", "shift": "KEY_LEFTSHIFT",
+              "meta": "KEY_LEFTMETA", "super": "KEY_LEFTMETA",
+              "win": "KEY_LEFTMETA"}
+
+
+def _keycode(ch):
+    """Map one character to (KEY_ name, needs_shift). None when unmappable."""
+    if ch in _SHIFTED:
+        base = _SHIFTED[ch]
+        return (f"KEY_{base}", True)
+    if ch in _PUNCT:
+        return (f"KEY_{_PUNCT[ch]}", False)
+    if ch.isdigit():
+        return (f"KEY_{ch}", False)
+    if ch.isalpha() and ch.isascii():
+        return (f"KEY_{ch.upper()}", ch.isupper())
+    return None
+
+
+class _UinputKeyboard:
+    def __init__(self):
+        from evdev import UInput, ecodes
+        self._ecodes = ecodes
+        keys = [c for c in ecodes.ecodes
+                if c.startswith("KEY_")]
+        cap = {ecodes.EV_KEY: [ecodes.ecodes[k] for k in keys]}
+        self._dev = UInput(cap, name="mercury-eyes keyboard")
+        time.sleep(SETTLE_S)
+
+    def tap(self, key_name, modifiers=()):
+        e = self._ecodes
+        code = e.ecodes.get(key_name)
+        if code is None:
+            raise KeyError(key_name)
+        mods = [e.ecodes[m] for m in modifiers]
+        for m in mods:
+            self._dev.write(e.EV_KEY, m, 1)
+        self._dev.syn()
+        self._dev.write(e.EV_KEY, code, 1)
+        self._dev.syn()
+        time.sleep(0.012)
+        self._dev.write(e.EV_KEY, code, 0)
+        for m in reversed(mods):
+            self._dev.write(e.EV_KEY, m, 0)
+        self._dev.syn()
+        time.sleep(0.018)
+
+    def close(self):
+        self._dev.close()
+
+
+def _open_keyboard():
+    """Device seam — monkeypatched in unit tests, real uinput live."""
+    return _UinputKeyboard()
+
+
+def type_text(text, **_):
+    """Dispatch `text` as keystrokes. Returns an OBSERVATION.
+
+    Reports `dispatched` (count of characters actually written) and
+    `unmapped` (characters this layout could not express). Never claims the
+    text arrived anywhere — no readback channel exists.
+    """
+    obs = {"requested": len(text), "dispatched": 0, "unmapped": [],
+           "verified": False,
+           "reason": "keystrokes have no readback channel; dispatched only",
+           "probed_at": time.time()}
+    dev = _open_keyboard()
+    try:
+        for ch in text:
+            mapped = _keycode(ch)
+            if mapped is None:
+                obs["unmapped"].append(ch)
+                continue
+            key_name, shifted = mapped
+            dev.tap(key_name, ("KEY_LEFTSHIFT",) if shifted else ())
+            obs["dispatched"] += 1
+        obs["probed_at"] = time.time()
+        return obs
+    finally:
+        dev.close()
+
+
+def key_combo(keys, **_):
+    """Dispatch one chord such as "ctrl+s" or "alt+F4". Returns an OBSERVATION."""
+    obs = {"requested": keys, "dispatched": False, "verified": False,
+           "reason": "keystrokes have no readback channel; dispatched only",
+           "probed_at": time.time()}
+    parts = [p.strip() for p in str(keys).split("+") if p.strip()]
+    if not parts:
+        obs["reason"] = "empty key specification"
+        return obs
+    *mod_names, final = parts
+    mods = []
+    for m in mod_names:
+        code = _MODIFIERS.get(m.lower())
+        if code is None:
+            obs["reason"] = f"unknown modifier {m!r}"
+            return obs
+        mods.append(code)
+
+    if len(final) == 1:
+        mapped = _keycode(final)
+        if mapped is None:
+            obs["reason"] = f"unmappable key {final!r}"
+            return obs
+        key_name, shifted = mapped
+        if shifted:
+            mods.append("KEY_LEFTSHIFT")
+    else:
+        key_name = f"KEY_{final.upper()}"
+
+    dev = _open_keyboard()
+    try:
+        dev.tap(key_name, tuple(mods))
+        obs["dispatched"] = True
+        obs["probed_at"] = time.time()
+        return obs
+    except KeyError:
+        obs["reason"] = f"unknown key name {key_name!r}"
+        return obs
+    finally:
+        dev.close()

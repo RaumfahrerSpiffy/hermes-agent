@@ -1,4 +1,6 @@
 """MercuryEyes tests. Invariants and provenance only — never this monitor's numbers."""
+import contextlib
+import json
 import sys
 
 import pytest
@@ -625,3 +627,149 @@ def test_sigterm_during_guard_still_relocks(tmp_path):
         if proc.poll() is None:
             proc.kill()
     assert state_file.read_text().strip() == "locked"
+
+
+# --- Task 10: the `screen` tool ---------------------------------------------
+# One tool, seven verbs, service-gated by check_fn. Contract: the handler
+# ALWAYS returns a JSON string (never raises, never returns a dict), input
+# verbs are approval-gated and run under the session guard, read verbs are
+# ungated and never unlock.
+
+
+def _screen_tool():
+    from tools import screen_tool
+    return screen_tool
+
+
+def _call(monkeypatch, args, approve=True, **stubs):
+    """Invoke the handler with the desktop layer and approval gate stubbed."""
+    st = _screen_tool()
+    calls = {"approval": [], "unlocked": 0}
+
+    def _approval(tool_name, reason, **kw):
+        calls["approval"].append((tool_name, reason))
+        return {"approved": approve,
+                "message": None if approve else "denied by user"}
+
+    monkeypatch.setattr(st, "request_tool_approval", _approval)
+
+    @contextlib.contextmanager
+    def _guard():
+        calls["unlocked"] += 1
+        yield {"unlocked": True, "was_active": True}
+
+    monkeypatch.setattr(st.session, "unlocked", _guard)
+    for attr, value in stubs.items():
+        target, _, fn = attr.partition("__")
+        monkeypatch.setattr(getattr(st, target), fn, value)
+    return st.handle_screen(args), calls
+
+
+def test_handler_always_returns_a_json_string(monkeypatch):
+    st = _screen_tool()
+    # even a verb whose backend explodes must come back as parseable JSON
+    monkeypatch.setattr(st.surfaces, "surfaces",
+                        lambda: (_ for _ in ()).throw(RuntimeError("bus down")))
+    out = st.handle_screen({"action": "surfaces"})
+    assert isinstance(out, str)
+    parsed = json.loads(out)
+    assert "error" in parsed
+    assert "bus down" in parsed["error"]
+
+
+def test_unknown_verb_is_an_honest_error(monkeypatch):
+    st = _screen_tool()
+    parsed = json.loads(st.handle_screen({"action": "teleport"}))
+    assert "error" in parsed
+    assert "teleport" in parsed["error"]
+
+
+def test_read_verbs_are_not_approval_gated_and_never_unlock(monkeypatch):
+    for verb, stub in (
+        ("surfaces", {"surfaces__surfaces": lambda: {"frames": [], "probed_at": 1.0}}),
+        ("cursor", {"pointer__cursor_pos": lambda: {"ok": True, "pos": [10, 20]}}),
+    ):
+        out, calls = _call(monkeypatch, {"action": verb}, **stub)
+        json.loads(out)
+        assert calls["approval"] == [], f"{verb} must not prompt for approval"
+        assert calls["unlocked"] == 0, f"{verb} must not unlock the session"
+
+
+def test_input_verbs_are_approval_gated(monkeypatch):
+    out, calls = _call(
+        monkeypatch, {"action": "click", "x": 100, "y": 200},
+        act__click=lambda x, y, **kw: {"ok": True, "clicked": [x, y]},
+    )
+    assert json.loads(out)["ok"] is True
+    assert len(calls["approval"]) == 1
+    assert calls["approval"][0][0] == "screen"
+    assert "100" in calls["approval"][0][1]      # coordinates shown to the human
+
+
+def test_denied_approval_performs_no_input(monkeypatch):
+    fired = []
+    out, calls = _call(
+        monkeypatch, {"action": "click", "x": 5, "y": 5}, approve=False,
+        act__click=lambda x, y, **kw: fired.append((x, y)) or {"ok": True},
+    )
+    parsed = json.loads(out)
+    assert fired == [], "input fired despite denied approval"
+    assert parsed.get("ok") is not True
+    assert "denied" in json.dumps(parsed).lower()
+    assert calls["unlocked"] == 0, "must not unlock when approval is denied"
+
+
+def test_input_verbs_run_under_the_session_guard(monkeypatch):
+    out, calls = _call(
+        monkeypatch, {"action": "type", "text": "hello"},
+        act__type_text=lambda text, **kw: {"ok": True, "typed": text},
+    )
+    assert json.loads(out)["ok"] is True
+    assert calls["unlocked"] == 1, "input must be wrapped in session.unlocked()"
+
+
+def test_check_fn_gates_on_the_real_desktop_requirements(monkeypatch):
+    st = _screen_tool()
+    monkeypatch.setattr(st.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(st.os, "access", lambda p, m: True)
+    monkeypatch.setattr(st.shutil, "which", lambda c: "/usr/bin/qdbus6")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    assert st._check() is True
+    # a host without the uinput write bit cannot drive input — stay hidden
+    monkeypatch.setattr(st.os, "access", lambda p, m: False)
+    assert st._check() is False
+    # a non-Wayland session is out of scope for this tool
+    monkeypatch.setattr(st.os, "access", lambda p, m: True)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    assert st._check() is False
+
+
+def test_registration_is_top_level_and_discoverable():
+    # the AST scanner in discover_builtin_tools() only sees module-body
+    # registry.register() calls — a nested one is silently never loaded
+    import ast
+    import pathlib
+    src = pathlib.Path(
+        "/home/peterb/.hermes/hermes-agent/tools/screen_tool.py").read_text()
+    tree = ast.parse(src)
+    top_level_register = any(
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "attr", "") == "register"
+        for node in tree.body
+    )
+    assert top_level_register, "registry.register() must be at module top level"
+
+
+def test_tool_is_registered_with_the_expected_surface():
+    from tools.registry import registry
+    import tools.screen_tool  # noqa: F401  — import triggers registration
+    entry = registry.get_entry("screen")
+    assert entry is not None
+    assert entry.toolset == "screen"
+    fn = entry.schema["function"]
+    assert fn["name"] == "screen"
+    verbs = set(fn["parameters"]["properties"]["action"]["enum"])
+    assert verbs == {"look", "surfaces", "wait", "click", "type", "key",
+                     "cursor"}
+    assert fn["parameters"]["required"] == ["action"]
