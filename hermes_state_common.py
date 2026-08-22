@@ -98,19 +98,41 @@ _COMPRESSION_CHILD_SQL = (
 )
 
 
-# Rows that surface in pickers: roots + branch children (subagent runs and
-# compression continuations stay hidden).
-_LISTABLE_CHILD_SQL = f"(s.parent_session_id IS NULL OR {_BRANCH_CHILD_SQL.format(a='s')})"
+# A child session counts as a reset successor (a fresh top-level conversation
+# that records its predecessor purely for lineage, see #12857/#82616) when its
+# parent ended with an intentional session-boundary reason. The reason list
+# mirrors the reset-fence used by find_latest_gateway_session_for_peer: these
+# are conversation boundaries, not spawn relationships, so the child must stay
+# visible in pickers and must never be treated as a cascade-delete target.
+_RESET_SUCCESSOR_SQL = (
+    "EXISTS (SELECT 1 FROM sessions p"
+    "        WHERE p.id = {a}.parent_session_id"
+    "        AND p.end_reason IN ('session_reset', 'session_switch',"
+    "                             'idle', 'daily', 'suspended',"
+    "                             'resume_pending_expired'))"
+)
+
+
+# Rows that surface in pickers: roots, branch children, and reset successors
+# (subagent runs and compression continuations stay hidden).
+_LISTABLE_CHILD_SQL = (
+    f"(s.parent_session_id IS NULL"
+    f" OR {_BRANCH_CHILD_SQL.format(a='s')}"
+    f" OR {_RESET_SUCCESSOR_SQL.format(a='s')})"
+)
 
 
 def _ephemeral_child_sql(alias: str = "s") -> str:
-    """Subagent runs (cascade-delete targets), not branches or compression tips."""
+    """Subagent runs (cascade-delete targets), not branches, compression tips,
+    or reset successors."""
     branch = _BRANCH_CHILD_SQL.format(a=alias)
     compression = _COMPRESSION_CHILD_SQL.format(a=alias)
+    reset_successor = _RESET_SUCCESSOR_SQL.format(a=alias)
     return (
         f"({alias}.parent_session_id IS NOT NULL"
         f" AND NOT ({branch})"
-        f" AND NOT ({compression}))"
+        f" AND NOT ({compression})"
+        f" AND NOT ({reset_successor}))"
     )
 
 
