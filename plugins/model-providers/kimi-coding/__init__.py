@@ -111,12 +111,27 @@ class KimiProfile(ProviderProfile):
 
         # Enabled: prefer an explicit effort; only fall back to extra_body
         # thinking when no recognized effort is requested. thinking and
-        # reasoning_effort are mutually exclusive (Moonshot HTTP 400 otherwise),
-        # so set exactly one branch — and apply Preserved Thinking (keep="all")
-        # only on the branch where thinking actually survives.
+        # reasoning_effort are mutually exclusive (Moonshot HTTP 400
+        # otherwise), so set exactly one branch — and apply Preserved
+        # Thinking (keep="all") only on the branch where thinking
+        # actually survives (MERCURY FORK).
+        # K3's vocabulary (low/high/max, default high) and its documented
+        # rounding (medium→high, xhigh→max) are declared in
+        # agent.reasoning_effort — shared with the chat-completions
+        # transport's Kimi path so both stay in sync.
+        from agent.reasoning_effort import (
+            KIMI_K3_EFFORTS,
+            KIMI_K3_OVERRIDES,
+            clamp_effort,
+        )
+
         effort = (reasoning_config.get("effort") or "").strip().lower()
-        if effort in {"low", "medium", "high"}:
-            top_level["reasoning_effort"] = effort
+        if effort and effort != "none":
+            k3_effort = clamp_effort(effort, KIMI_K3_EFFORTS, KIMI_K3_OVERRIDES)
+        else:
+            k3_effort = None
+        if k3_effort in KIMI_K3_EFFORTS:
+            top_level["reasoning_effort"] = k3_effort
         else:
             extra_body["thinking"] = {"type": "enabled"}
             if keep_thinking:
