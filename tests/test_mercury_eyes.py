@@ -153,3 +153,71 @@ def test_noise_frame_is_usable(tmp_path):
     s = frame_stats(str(p))
     ok, _ = is_degenerate(s)
     assert ok is False
+
+
+# --- Task 4: portal capture with sanity gate --------------------------------
+
+
+def _fake_grab(tmp_path, w, h, noise=True):
+    """Fabricate a portal-grab result for unit tests (no portal round-trip)."""
+    import numpy as np
+    from PIL import Image
+    p = tmp_path / "grab.png"
+    if noise:
+        a = (np.random.rand(h, w, 3) * 255).astype("uint8")
+        Image.fromarray(a).save(p)
+    else:
+        Image.new("RGB", (w, h), (0, 0, 0)).save(p)
+    return {"path": str(p), "screensaver_active": False}
+
+
+def test_capture_contract_on_usable_frame(tmp_path, monkeypatch):
+    from tools.mercury_eyes import capture, geometry
+    g = geometry.probe()
+    pw, ph = g["physical"]
+    monkeypatch.setattr(capture, "_portal_grab",
+                        lambda out: _fake_grab(tmp_path, pw, ph))
+    r = capture.capture(out=str(tmp_path / "out.png"))
+    assert r["usable"] is True
+    assert r["physical"] == (pw, ph)
+    assert r["scale"] == g["scale"]
+    assert r["stats"]["unique_colours"] > 50
+    assert r["screensaver_active"] is False
+    import os
+    assert os.path.exists(r["path"])
+
+
+def test_capture_refuses_blank_frame(tmp_path, monkeypatch):
+    from tools.mercury_eyes import capture, geometry
+    pw, ph = geometry.probe()["physical"]
+    monkeypatch.setattr(capture, "_portal_grab",
+                        lambda out: _fake_grab(tmp_path, pw, ph, noise=False))
+    r = capture.capture(out=str(tmp_path / "out.png"))
+    assert r["usable"] is False
+    assert r["reasons"]  # human-readable, never silent
+
+
+def test_capture_refuses_nonuniform_scale(tmp_path, monkeypatch):
+    # Borrowed from spike 004: when capture/logical scale disagrees per axis
+    # (rotation, panning), coordinate mapping is refused rather than wrong.
+    from tools.mercury_eyes import capture, geometry
+    lw, lh = geometry.probe()["logical"]
+    # square capture over a non-square logical desktop -> axis scales differ
+    side = max(lw, lh) + 40
+    monkeypatch.setattr(capture, "_portal_grab",
+                        lambda out: _fake_grab(tmp_path, side, side))
+    r = capture.capture(out=str(tmp_path / "out.png"))
+    assert r["usable"] is False
+    assert any("scale" in reason for reason in r["reasons"])
+
+
+def test_capture_reports_portal_failure_honestly(tmp_path, monkeypatch):
+    from tools.mercury_eyes import capture
+
+    def boom(out):
+        raise RuntimeError("portal timeout")
+
+    monkeypatch.setattr(capture, "_portal_grab", boom)
+    r = capture.capture(out=str(tmp_path / "out.png"))
+    assert r["usable"] is False
+    assert any("portal" in reason for reason in r["reasons"])

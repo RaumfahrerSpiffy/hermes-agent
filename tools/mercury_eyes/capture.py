@@ -9,15 +9,24 @@ Thresholds MEASURED 2026-08-21 against real captures (spike 003b):
 blank lock-screen frame = 1 colour / 0.0 stddev / 100% dominant / ~4 kB per
 megapixel; real desktop frames = 22k+ colours. The margins are wide.
 """
+import json
 import os
+import subprocess
+import sys
 
 import numpy as np
 from PIL import Image
+
+from . import geometry
 
 MAX_UNIQUE_COLOURS = 50      # below this the frame is near-monochrome
 MIN_LUM_STD = 8.0            # below this luminance is flat
 MAX_DOMINANT_FRAC = 0.92     # above this one colour owns the frame
 MIN_BYTES_PER_MP = 20000     # below this the PNG compressed to nothing
+
+SCALE_TOLERANCE = 0.02       # spike 004: per-axis scale disagreement allowed
+_HELPER = os.path.join(os.path.dirname(__file__), "portal_helper.py")
+_SYSTEM_PYTHON = "/usr/bin/python3"  # has gi/dbus; the agent venv does not
 
 
 def frame_stats(path):
@@ -58,3 +67,77 @@ def is_degenerate(stats):
     if stats["bytes_per_mp"] < MIN_BYTES_PER_MP:
         reasons.append(f"{stats['bytes_per_mp']} bytes/MP (too compressible)")
     return (bool(reasons), reasons)
+
+
+def _portal_grab(out):
+    """One portal screenshot via the system interpreter (gi/dbus live there).
+
+    Returns {"path": ..., "screensaver_active": bool|None}. Raises on failure.
+    Monkeypatched in unit tests; exercised for real in the acceptance run.
+    """
+    r = subprocess.run([_SYSTEM_PYTHON, _HELPER, out],
+                       capture_output=True, text=True, timeout=45)
+    line = (r.stdout.strip().splitlines() or [""])[-1]
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        raise RuntimeError(
+            f"portal helper spoke no JSON (exit {r.returncode}): "
+            f"{r.stderr.strip()[:200]}")
+    if not payload.get("ok"):
+        raise RuntimeError(f"portal grab failed: {payload.get('error')}")
+    return {"path": payload["path"],
+            "screensaver_active": payload.get("screensaver_active")}
+
+
+def capture(out="/tmp/mercury_eye.png"):
+    """Full-frame portal capture that refuses to return a lie.
+
+    Returns a dict, always:
+      usable            True only when the frame passed every gate
+      path              the PNG on disk (present even when unusable, for triage)
+      physical          (w, h) of the capture in PHYSICAL pixels
+      logical           (w, h) of the logical desktop (derived)
+      scale             capture_w / logical_w when uniform
+      stats             frame_stats() output
+      screensaver_active  ScreenSaver.GetActive at grab time (None = unknown)
+      reasons           why usable is False (never silent)
+
+    Gates, in order: portal grab succeeded -> per-axis scale uniform
+    (spike 004: rotation/panning otherwise maps clicks silently wrong) ->
+    frame not degenerate (failure #5: a blank frame is not an observation).
+    """
+    result = {"usable": False, "path": out, "physical": None, "logical": None,
+              "scale": None, "stats": None, "screensaver_active": None,
+              "reasons": []}
+
+    try:
+        grab = _portal_grab(out)
+    except Exception as e:
+        result["reasons"].append(f"portal capture failed: {e}")
+        return result
+    result["path"] = grab["path"]
+    result["screensaver_active"] = grab.get("screensaver_active")
+
+    stats = frame_stats(grab["path"])
+    result["stats"] = stats
+    result["physical"] = (stats["width"], stats["height"])
+
+    g = geometry.probe()
+    lw, lh = g["logical"]
+    result["logical"] = (lw, lh)
+    sx = stats["width"] / lw if lw else 0.0
+    sy = stats["height"] / lh if lh else 0.0
+    if abs(sx - sy) > SCALE_TOLERANCE * max(sx, sy):
+        result["reasons"].append(
+            f"non-uniform scale: x={sx:.4f} vs y={sy:.4f} against logical "
+            f"{lw}x{lh} — refusing coordinate mapping (rotation/panning?)")
+    else:
+        result["scale"] = sx
+
+    degenerate, why = is_degenerate(stats)
+    if degenerate:
+        result["reasons"].extend(why)
+
+    result["usable"] = not result["reasons"]
+    return result
