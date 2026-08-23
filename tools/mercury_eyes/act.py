@@ -26,11 +26,31 @@ SETTLE_S = 2.0          # measured: events vanish below ~2 s enumeration
 CLICK_TOLERANCE = 3     # px; |delta| beyond this refuses the click
 
 
+def _import_evdev():
+    """Import evdev, lazy-installing it if a sync pruned it.
+
+    MEASURED 2026-08-23: evdev was hand-installed during the build and was
+    absent from pyproject.toml, so a later `uv sync` removed it and every
+    input verb died on ImportError while the read verbs stayed green. It is
+    now declared in the `screen` extra AND here, so a prune self-heals on
+    first use instead of failing at the worst moment. Read verbs never take
+    this path — perception must not depend on an install succeeding.
+    """
+    try:
+        from tools.lazy_deps import ensure as _lazy_ensure
+        _lazy_ensure("screen.uinput", prompt=False)
+    except Exception:
+        pass  # FeatureUnavailable / no lazy_deps — let the import speak
+    import evdev
+    return evdev
+
+
 class _UinputPointer:
     """Absolute uinput pointer over the derived logical desktop."""
 
     def __init__(self, width, height):
-        from evdev import (AbsInfo, UInput, ecodes)
+        _ev = _import_evdev()
+        AbsInfo, UInput, ecodes = _ev.AbsInfo, _ev.UInput, _ev.ecodes
         cap = {
             ecodes.EV_ABS: [
                 (ecodes.ABS_X, AbsInfo(0, 0, max(width - 1, 1), 0, 0, 1)),
@@ -204,7 +224,8 @@ def _keyboard_cap(ecodes):
 
 class _UinputKeyboard:
     def __init__(self):
-        from evdev import UInput, ecodes
+        _ev = _import_evdev()
+        UInput, ecodes = _ev.UInput, _ev.ecodes
         self._ecodes = ecodes
         cap = _keyboard_cap(ecodes)
         self._dev = UInput(cap, name="mercury-eyes keyboard")

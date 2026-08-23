@@ -219,6 +219,14 @@ wake = [
   # macOS equivalent, bridged in tools/wake_word.py.
   "ai-edge-litert==2.1.6; platform_system == 'Darwin'",
 ]
+# MercuryEyes input verbs (the `screen` tool's click/type/key). Reads and
+# writes /dev/uinput, a Linux-only kernel interface — the tool's own check_fn
+# already withholds it from every non-Wayland host, so this extra exists to
+# keep the dep OUT of core `dependencies` while still declaring it. Without a
+# declaration it survived only as a hand-installed package and a `uv sync`
+# pruned it (MEASURED 2026-08-23: click/type/key dead, one test erroring on
+# ModuleNotFoundError). Mirrored in tools/lazy_deps.py under `screen.uinput`.
+screen = ["evdev==1.9.3; sys_platform == 'linux'"]
 honcho = ["honcho-ai==2.2.0"]
 # NOTE: the former `memory-embeddings` extra (sentence-transformers for the
 # holographic store's dense Hybrid-Full signal) was REMOVED 2026-06-12: the

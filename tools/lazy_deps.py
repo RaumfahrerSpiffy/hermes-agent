@@ -119,6 +119,13 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "search.firecrawl": ("firecrawl-py==4.17.0",),
     "search.parallel": ("parallel-web==0.4.2",),
 
+    # ─── Local desktop control (MercuryEyes `screen` tool) ─────────────────
+    # evdev backs the input verbs (click/type/key) via /dev/uinput. Tracks the
+    # `screen` extra in pyproject.toml — bump both together. The marker cannot
+    # ride in the spec string (_spec_is_safe rejects ';'), so the platform gate
+    # lives in _unsupported_feature_reason() below.
+    "screen.uinput": ("evdev==1.9.3",),
+
     # ─── Monitoring ─────────────────────────────────────────────────────────
     # OTLP gateway monitoring export. Lazily installed on first use of
     # monitoring.gateway_health_export / monitoring.export.otlp. Tracks the
@@ -548,6 +555,12 @@ def _unsupported_feature_reason(feature: str) -> Optional[str]:
             "unsupported on Windows: Matrix E2EE depends on python-olm, "
             "which has no Windows wheel and requires make + libolm to build "
             "from sdist. Run Hermes under WSL to use Matrix on Windows."
+        )
+    if sys.platform != "linux" and feature == "screen.uinput":
+        return (
+            "unsupported off Linux: the `screen` tool's input verbs drive "
+            "/dev/uinput, a Linux kernel interface. evdev has no wheel for "
+            "this platform."
         )
     return None
 
