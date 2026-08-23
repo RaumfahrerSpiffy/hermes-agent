@@ -206,7 +206,8 @@ def capture(out="/tmp/mercury_eye.png", wake_if_dark=True):
     """
     result = {"usable": False, "path": out, "physical": None, "logical": None,
               "scale": None, "stats": None, "screensaver_active": None,
-              "woke": False, "dpms": None, "reasons": []}
+              "woke": False, "dpms": None, "probed_at": time.time(),
+              "reasons": []}
 
     def _grab_and_measure(target):
         grab = _portal_grab(target)
@@ -265,5 +266,6 @@ def capture(out="/tmp/mercury_eye.png", wake_if_dark=True):
     if degenerate:
         result["reasons"].extend(why)
 
+    result["probed_at"] = time.time()
     result["usable"] = not result["reasons"]
     return result

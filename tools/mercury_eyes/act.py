@@ -153,6 +153,9 @@ _MODIFIERS = {"ctrl": "KEY_LEFTCTRL", "control": "KEY_LEFTCTRL",
               "alt": "KEY_LEFTALT", "shift": "KEY_LEFTSHIFT",
               "meta": "KEY_LEFTMETA", "super": "KEY_LEFTMETA",
               "win": "KEY_LEFTMETA"}
+_KEY_ALIASES = {"ESCAPE": "KEY_ESC", "RETURN": "KEY_ENTER",
+                "DEL": "KEY_DELETE", "PGUP": "KEY_PAGEUP",
+                "PGDN": "KEY_PAGEDOWN"}
 
 
 def _keycode(ch):
@@ -169,13 +172,41 @@ def _keycode(ch):
     return None
 
 
+def _keyboard_cap(ecodes):
+    """EV_KEY capability set for the virtual keyboard.
+
+    MEASURED 2026-08-22: declaring every KEY_* name from ecodes made UInput
+    creation fail with EINVAL — the full list contains reserved codes the
+    kernel rejects. A curated set of the keys this tool can actually emit is
+    both valid and honest about what we can type.
+    """
+    names = (
+        [f"KEY_{c}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
+        + [f"KEY_{d}" for d in "0123456789"]
+        + [f"KEY_{p}" for p in (
+            "MINUS", "EQUAL", "LEFTBRACE", "RIGHTBRACE", "BACKSLASH",
+            "SEMICOLON", "APOSTROPHE", "COMMA", "DOT", "SLASH", "GRAVE",
+            "SPACE", "ENTER", "TAB", "BACKSPACE", "ESC", "ESCAPE",
+            "LEFT", "RIGHT", "UP", "DOWN", "HOME", "END", "PAGEUP",
+            "PAGEDOWN", "INSERT", "DELETE")]
+        + [f"KEY_F{i}" for i in range(1, 13)]
+        + ["KEY_LEFTCTRL", "KEY_RIGHTCTRL", "KEY_LEFTALT", "KEY_RIGHTALT",
+           "KEY_LEFTSHIFT", "KEY_RIGHTSHIFT", "KEY_LEFTMETA", "KEY_RIGHTMETA",
+           "KEY_CAPSLOCK", "KEY_NUMLOCK"]
+    )
+    codes = []
+    for n in names:
+        code = ecodes.ecodes.get(n)
+        if code is not None and code > 0:
+            codes.append(code)
+    return {ecodes.EV_KEY: sorted(set(codes))}
+
+
 class _UinputKeyboard:
     def __init__(self):
         from evdev import UInput, ecodes
         self._ecodes = ecodes
-        keys = [c for c in ecodes.ecodes
-                if c.startswith("KEY_")]
-        cap = {ecodes.EV_KEY: [ecodes.ecodes[k] for k in keys]}
+        cap = _keyboard_cap(ecodes)
         self._dev = UInput(cap, name="mercury-eyes keyboard")
         time.sleep(SETTLE_S)
 
@@ -260,7 +291,7 @@ def key_combo(keys, **_):
         if shifted:
             mods.append("KEY_LEFTSHIFT")
     else:
-        key_name = f"KEY_{final.upper()}"
+        key_name = _KEY_ALIASES.get(final.upper(), f"KEY_{final.upper()}")
 
     dev = _open_keyboard()
     try:

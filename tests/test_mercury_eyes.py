@@ -1048,3 +1048,184 @@ def test_origin_space_unknown_still_says_why(monkeypatch):
     out = geometry._calibrated_origin_space((2048, 1152), (2560, 1440), 1.25)
     assert out["origin_space"] == "unknown"
     assert out["evidence"], "unknown must always carry its reason"
+
+
+def test_capture_carries_probed_at(monkeypatch):
+    """Freshness contract (failure #6) applies to `look` too.
+
+    MEASURED 2026-08-22 during Task 11 acceptance: cursor and surfaces both
+    carry probed_at; capture() did not. Every observation rides a timestamp
+    or none of the contract means anything.
+    """
+    from tools.mercury_eyes import capture
+    monkeypatch.setattr(capture, "_portal_grab",
+                        lambda out: {"path": "/tmp/real.png",
+                                     "screensaver_active": False})
+    monkeypatch.setattr(capture, "frame_stats", lambda p: {
+        "path": "/tmp/real.png", "width": 2560, "height": 1440,
+        "bytes": 900000, "bytes_per_mp": 244140, "unique_colours": 22000,
+        "lum_std": 61.2, "dominant_frac": 0.11})
+    monkeypatch.setattr(capture.geometry, "probe",
+                        lambda: {"logical": (2048, 1152),
+                                 "origin_space": "logical"})
+    import time
+    before = time.time()
+    r = capture.capture(out="/tmp/x.png", wake_if_dark=False)
+    assert "probed_at" in r
+    assert before <= r["probed_at"] <= time.time()
+
+
+def test_keyboard_capability_excludes_reserved_codes():
+    """MEASURED 2026-08-22: declaring ALL KEY_* names from ecodes made UInput
+    creation fail EINVAL — reserved codes are rejected by the kernel. The cap
+    set must be curated."""
+    from tools.mercury_eyes import act
+    from evdev import ecodes
+    cap = act._keyboard_cap(ecodes)
+    codes = cap[ecodes.EV_KEY]
+    assert 0 not in codes, "code 0 (KEY_RESERVED) is rejected by uinput"
+    assert all(c <= 0x2FF for c in codes), "codes beyond KEY_MAX are invalid"
+    assert ecodes.KEY_A in codes and ecodes.KEY_1 in codes
+    assert ecodes.KEY_LEFTCTRL in codes and ecodes.KEY_ESC in codes
+
+
+def test_key_combo_aliases_evdev_names():
+    """'Escape' must resolve to KEY_ESC, not the nonexistent KEY_ESCAPE."""
+    from tools.mercury_eyes import act
+    assert act._KEY_ALIASES["ESCAPE"] == "KEY_ESC"
+    assert act._KEY_ALIASES["RETURN"] == "KEY_ENTER"
+
+
+def test_type_and_key_report_dispatched_not_typed(monkeypatch):
+    from tools.mercury_eyes import act
+
+    class _FakeKbd:
+        def __init__(self):
+            self.taps = []
+
+        def tap(self, key_name, modifiers=()):
+            self.taps.append((key_name, modifiers))
+
+        def close(self):
+            pass
+
+    kbd = _FakeKbd()
+    monkeypatch.setattr(act, "_open_keyboard", lambda: kbd)
+    r = act.type_text("aB!")
+    assert r["dispatched"] == 3
+    assert r["verified"] is False
+    assert ("KEY_A", ()) in kbd.taps
+    assert ("KEY_B", ("KEY_LEFTSHIFT",)) in kbd.taps
+    assert ("KEY_1", ("KEY_LEFTSHIFT",)) in kbd.taps
+
+    kbd.taps.clear()
+    r = act.key_combo("ctrl+s")
+    assert r["dispatched"] is True
+    assert ("KEY_S", ("KEY_LEFTCTRL",)) in kbd.taps
+
+
+# --- KWin-authoritative window geometry -------------------------------------
+# MEASURED 2026-08-22 during Task 11 acceptance: EVERY application window on
+# this host reports AT-SPI origin (0,0) — kcalc [0,0,640,480] while visibly
+# center-screen, Thorium [0,0,...], Discover [0,0,...]. On Wayland, clients
+# cannot see their own absolute geometry; only the compositor can. A click
+# aimed at the AT-SPI rectangle struck bare desktop and the desktop-focused
+# typing opened KRunner. AT-SPI keeps names/roles/children; KWin supplies
+# position.
+
+
+def test_surfaces_includes_kwin_windows(monkeypatch):
+    from tools.mercury_eyes import surfaces
+    monkeypatch.setattr(
+        surfaces, "_enumerate_frames",
+        lambda: ([_fr("kcalc", "KCalc", (0, 0, 640, 480))], None))
+    monkeypatch.setattr(
+        surfaces, "_kwin_windows",
+        lambda: ([{"app": "kcalc", "caption": "KCalc",
+                   "x": 704, "y": 336, "w": 640, "h": 480,
+                   "minimized": False}], None))
+    monkeypatch.setattr(surfaces.geometry, "probe",
+                        lambda: {"origin_space": "logical"})
+    obs = surfaces.surfaces()
+    assert "windows" in obs
+    assert obs["windows"][0]["x"] == 704
+    assert obs["windows_ok"] is True
+
+
+def test_kwin_geometry_attaches_to_matching_frames(monkeypatch):
+    """A frame whose app matches a KWin window gets authoritative geometry."""
+    from tools.mercury_eyes import surfaces
+    monkeypatch.setattr(
+        surfaces, "_enumerate_frames",
+        lambda: ([_fr("kcalc", "KCalc", (0, 0, 640, 480))], None))
+    monkeypatch.setattr(
+        surfaces, "_kwin_windows",
+        lambda: ([{"app": "kcalc", "caption": "KCalc",
+                   "x": 704, "y": 336, "w": 640, "h": 480,
+                   "minimized": False}], None))
+    monkeypatch.setattr(surfaces.geometry, "probe",
+                        lambda: {"origin_space": "logical"})
+    obs = surfaces.surfaces()
+    fr = obs["frames"][0]
+    assert fr["geom"] == [704, 336, 640, 480], (
+        "KWin geometry must replace the untrustworthy AT-SPI origin")
+    assert fr["geom_source"] == "kwin"
+
+
+def test_unmatched_frames_are_flagged_not_faked(monkeypatch):
+    from tools.mercury_eyes import surfaces
+    monkeypatch.setattr(
+        surfaces, "_enumerate_frames",
+        lambda: ([_fr("plasmashell", "", (0, 1090, 2048, 62))], None))
+    monkeypatch.setattr(surfaces, "_kwin_windows", lambda: ([], None))
+    monkeypatch.setattr(surfaces.geometry, "probe",
+                        lambda: {"origin_space": "logical"})
+    obs = surfaces.surfaces()
+    fr = obs["frames"][0]
+    assert fr["geom"] == [0, 1090, 2048, 62]   # keep AT-SPI value
+    assert fr["geom_source"] == "atspi"        # but SAY so
+
+
+def test_kwin_failure_does_not_break_surfaces(monkeypatch):
+    from tools.mercury_eyes import surfaces
+    monkeypatch.setattr(
+        surfaces, "_enumerate_frames",
+        lambda: ([_fr("kcalc", "KCalc", (0, 0, 640, 480))], None))
+    monkeypatch.setattr(surfaces, "_kwin_windows",
+                        lambda: ([], "kwin scripting unavailable"))
+    monkeypatch.setattr(surfaces.geometry, "probe",
+                        lambda: {"origin_space": "logical"})
+    obs = surfaces.surfaces()
+    assert obs["windows_ok"] is False
+    assert obs["windows_error"] == "kwin scripting unavailable"
+    assert obs["frames"][0]["geom_source"] == "atspi"
+
+
+def test_reverse_domain_app_names_match(monkeypatch):
+    """AT-SPI 'kcalc' must match KWin 'org.kde.kcalc'.
+
+    MEASURED 2026-08-22: exact app-name matching missed both live kcalc
+    windows; the merge left (0,0) origins while reporting success.
+    KWin also returns float coordinates — merged geometry must be int.
+    """
+    from tools.mercury_eyes import surfaces
+    monkeypatch.setattr(
+        surfaces, "_enumerate_frames",
+        lambda: ([_fr("kcalc", "KCalc", (0, 0, 640, 480)),
+                  _fr("kcalc", "KCalc", (0, 0, 640, 480))], None))
+    monkeypatch.setattr(
+        surfaces, "_kwin_windows",
+        lambda: ([{"app": "org.kde.kcalc", "caption": "KCalc",
+                   "x": 704.0, "y": 299.0, "w": 640.0, "h": 508.0,
+                   "minimized": False},
+                  {"app": "org.kde.kcalc", "caption": "KCalc",
+                   "x": 746.67, "y": 322.04, "w": 640.0, "h": 508.0,
+                   "minimized": False}], None))
+    monkeypatch.setattr(surfaces.geometry, "probe",
+                        lambda: {"origin_space": "logical"})
+    obs = surfaces.surfaces()
+    first, second = obs["frames"]
+    assert first["geom"] == [704, 299, 640, 508]
+    assert first["geom_source"] == "kwin"
+    assert second["geom"] == [747, 322, 640, 508]  # floats rounded
+    assert second["geom_source"] == "kwin"
