@@ -1511,7 +1511,51 @@ def _live_system_guard(request, monkeypatch):
                     return True
         return False
 
+    # Commands that change the PHYSICAL state of the developer's machine:
+    # screen lock, screensaver, display power. Matched as (executable,
+    # required-substring) pairs. Read-only forms are deliberately absent so
+    # diagnosis still works — `--dpms show` reports power state, `--dpms
+    # on|off` changes it; `GetActive` reads, `SetActive` writes.
+    _SESSION_STATE_MUTATORS = (
+        ("loginctl", "unlock-session"),
+        ("loginctl", "lock-session"),
+        ("qdbus6", "SetActive"),
+        ("qdbus", "SetActive"),
+        ("kscreen-doctor", "--dpms on"),
+        ("kscreen-doctor", "--dpms off"),
+    )
+
+    def _is_session_state_mutator(cmd):
+        """Return the offending argv string, or None."""
+        cmd_str = _cmd_to_string(cmd)
+        if not cmd_str:
+            return None
+        tokens = cmd_str.split()
+        if not tokens:
+            return None
+        head = tokens[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        for want_exe, want_arg in _SESSION_STATE_MUTATORS:
+            if head == want_exe and want_arg in cmd_str:
+                return cmd_str
+        return None
+
     def _check_subprocess_cmd(name, cmd):
+        offending = _is_session_state_mutator(cmd)
+        if offending:
+            raise RuntimeError(
+                f"tests/conftest.py live-system guard: blocked "
+                f"subprocess.{name}({cmd!r}) — would change the real screen "
+                "lock, screensaver, or display power on the developer's "
+                "machine. MEASURED 2026-08-23: the MercuryEyes session-guard "
+                "tests patched _screensaver_active and _set_screensaver but "
+                "NOT _loginctl, so every run fired a real `loginctl "
+                "unlock-session` at the live session while the compensating "
+                "re-lock went to a fake — the machine was left unlocked. "
+                "Patch EVERY seam (session._loginctl, session._qdbus, "
+                "session._set_screensaver) so the call never reaches the "
+                "system, or mark with @pytest.mark.live_system_guard_bypass "
+                "if a real transition is genuinely intended."
+            )
         if _is_blocked_systemctl(cmd):
             raise RuntimeError(
                 f"tests/conftest.py live-system guard: blocked "

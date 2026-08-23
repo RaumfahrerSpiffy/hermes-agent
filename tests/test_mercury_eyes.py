@@ -536,11 +536,28 @@ class _FakeSession:
             return          # greeter stays up — the measured KDE trap
         self.active = value
 
+    def loginctl(self, verb):
+        # Recorded, never executed. The real _loginctl shells out to the live
+        # session; see _wire_session's docstring for what that cost.
+        self.calls.append(f"loginctl:{verb}")
+
 
 def _wire_session(monkeypatch, fake):
+    """Patch EVERY seam that reaches real session state.
+
+    MEASURED 2026-08-23: this helper previously patched only
+    ``_screensaver_active`` and ``_set_screensaver``. ``unlocked()`` also
+    calls ``_loginctl("unlock-session")``, which went straight through to the
+    developer's live session — so each run of the four guard tests below
+    really unlocked the machine while the compensating re-lock landed on the
+    fake object. The unlock was real; the re-lock was not. Patching all three
+    is the fix; tests/conftest.py::_forbid_real_session_state_changes is the
+    backstop that makes the same omission fail loudly next time.
+    """
     from tools.mercury_eyes import session
     monkeypatch.setattr(session, "_screensaver_active", fake.get_active)
     monkeypatch.setattr(session, "_set_screensaver", fake.set_active)
+    monkeypatch.setattr(session, "_loginctl", fake.loginctl)
     return session
 
 
@@ -588,6 +605,56 @@ def test_already_unlocked_session_is_left_alone(monkeypatch):
         assert state["was_active"] is False
     assert fake.active is False             # left as we found it
     assert "set:True" not in fake.calls
+
+
+def test_wire_session_patches_every_real_seam(monkeypatch):
+    """The helper must leave NO path to the live session.
+
+    MEASURED 2026-08-23: _wire_session patched the two screensaver seams but
+    not _loginctl, so every run of the guard tests below fired a real
+    `loginctl unlock-session` at the developer's session while the re-lock
+    went to the fake. The unlock was real and the re-lock was not. This pins
+    the symmetry: after wiring, nothing reaches subprocess at all.
+    """
+    from tools.mercury_eyes import session
+
+    escaped = []
+    monkeypatch.setattr(
+        session.subprocess, "run",
+        lambda cmd, *a, **kw: escaped.append(list(cmd)) or type(
+            "R", (), {"returncode": 0, "stdout": "false", "stderr": ""})(),
+    )
+
+    fake = _FakeSession(active=True)
+    _wire_session(monkeypatch, fake)
+    with session.unlocked():
+        assert fake.active is False
+
+    assert not escaped, f"a real command reached the system: {escaped}"
+    assert "loginctl:unlock-session" in fake.calls, (
+        "the _loginctl seam was never exercised — this test would not have "
+        "caught the original defect"
+    )
+    assert fake.active is True, "session was not re-locked"
+
+
+def test_session_guard_subprocess_body_patches_loginctl():
+    """The SIGTERM test spawns a child; conftest's guard cannot reach it.
+
+    tests/conftest.py's ``_live_system_guard`` patches subprocess in THIS
+    process only. test_sigterm_during_guard_still_relocks runs its guarded
+    body in a child interpreter, so the child's own source is the only thing
+    standing between it and a real unlock. Assert that source still stubs all
+    three seams.
+    """
+    import inspect
+
+    src = inspect.getsource(test_sigterm_during_guard_still_relocks)
+    for seam in ("_screensaver_active", "_set_screensaver", "_loginctl"):
+        assert f"session.{seam} =" in src, (
+            f"child script no longer stubs {seam}; it would unlock the real "
+            f"session when this test runs"
+        )
 
 
 def test_sigterm_during_guard_still_relocks(tmp_path):

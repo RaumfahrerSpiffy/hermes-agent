@@ -59,8 +59,15 @@ def _set_screensaver(value):
 
 
 def _loginctl(verb):
-    """Best-effort session verb; never fatal on its own (SetActive is the
-    load-bearing call, this is belt-and-braces for the greeter)."""
+    """Session lock verb. LOAD-BEARING — patch this in any test.
+
+    The original comment here called this "belt-and-braces" behind
+    SetActive. MEASURED 2026-08-23: on this host `loginctl unlock-session`
+    ALONE drops the greeter, so this call changes real machine state by
+    itself. Test doubles that patch only the screensaver seams still unlock
+    the developer's session through this function (it happened, four times).
+    Never fatal on its own, but never harmless either.
+    """
     try:
         subprocess.run(["loginctl", verb], capture_output=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
