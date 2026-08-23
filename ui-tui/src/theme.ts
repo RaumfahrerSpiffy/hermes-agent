@@ -969,9 +969,7 @@ export function fromSkin(
 
       bannerLogo,
       bannerHero,
-      bannerHeroAvatar:
-        branding.banner_hero_avatar === 'true' ||
-        (branding.banner_hero_avatar as unknown) === true
+      bannerHeroAvatar: branding.banner_hero_avatar === 'true' || (branding.banner_hero_avatar as unknown) === true
     },
     process.env,
     isLight

@@ -665,6 +665,7 @@ export const sessionCommands: SlashCommand[] = [
         // first (matching the CLI / gateway order), then credits, before the
         // token panel.
         const accountLines = r?.account_lines ?? []
+
         if (accountLines.length) {
           ctx.transcript.panel('Account limits', [{ text: accountLines.join('\n') }])
         }
