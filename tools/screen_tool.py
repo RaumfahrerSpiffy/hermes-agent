@@ -34,53 +34,59 @@ from tools.registry import registry
 READ_VERBS = ("look", "surfaces", "cursor", "wait")
 INPUT_VERBS = ("click", "type", "key")
 
+# NOTE: this is the BARE function object — name/description/parameters at the
+# top level. `registry.get_definitions()` adds the
+# `{"type": "function", "function": ...}` envelope itself. Registering a
+# pre-wrapped schema here type-checks and dispatches fine (the handler
+# validates its own args), so the only symptom is silent: the model receives
+# an empty description and empty parameters, and `tool_describe` reports
+# `{"description": "", "parameters": {}}`. MEASURED 2026-08-23 — the tool was
+# callable but undescribed, so anything without prior knowledge of the verbs
+# was flying blind. Audited the same day: 1 of 93 registered tools had it.
 SCREEN_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "screen",
-        "description": (
-            "See and control the local KDE/Wayland desktop. Verbs: "
-            "look (screenshot with frame-sanity check), surfaces (window "
-            "inventory), cursor (compositor pointer position), wait (block "
-            "until a matching window appears), click, type, key. "
-            "Every action returns an OBSERVATION, not a success flag: clicks "
-            "assert the cursor landed before firing and REFUSE when it did "
-            "not; keystrokes have no readback channel and report as "
-            "dispatched only. Input verbs require human approval and "
-            "temporarily unlock the session."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["look", "surfaces", "wait", "click", "type",
-                             "key", "cursor"],
-                    "description": "Which verb to run.",
-                },
-                "x": {"type": "integer",
-                      "description": "Click target X, logical pixels."},
-                "y": {"type": "integer",
-                      "description": "Click target Y, logical pixels."},
-                "button": {"type": "string", "enum": ["left", "right", "middle"],
-                           "description": "Mouse button for click. Default left."},
-                "text": {"type": "string",
-                         "description": "Text to type for the type verb."},
-                "keys": {"type": "string",
-                         "description": "Chord for the key verb, e.g. 'ctrl+s'."},
-                "app": {"type": "string",
-                        "description": "Substring match on application name (wait)."},
-                "name": {"type": "string",
-                         "description": "Substring match on window title (wait)."},
-                "role": {"type": "string",
-                         "description": "Substring match on AT-SPI role (wait)."},
-                "timeout": {"type": "number",
-                            "description": "Seconds to wait before reporting timeout."},
-                "out": {"type": "string",
-                        "description": "Where to write the screenshot (look)."},
+    "name": "screen",
+    "description": (
+        "See and control the local KDE/Wayland desktop. Verbs: "
+        "look (screenshot with frame-sanity check), surfaces (window "
+        "inventory), cursor (compositor pointer position), wait (block "
+        "until a matching window appears), click, type, key. "
+        "Every action returns an OBSERVATION, not a success flag: clicks "
+        "assert the cursor landed before firing and REFUSE when it did "
+        "not; keystrokes have no readback channel and report as "
+        "dispatched only. Input verbs require human approval and "
+        "temporarily unlock the session."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["look", "surfaces", "wait", "click", "type",
+                         "key", "cursor"],
+                "description": "Which verb to run.",
             },
-            "required": ["action"],
+            "x": {"type": "integer",
+                  "description": "Click target X, logical pixels."},
+            "y": {"type": "integer",
+                  "description": "Click target Y, logical pixels."},
+            "button": {"type": "string", "enum": ["left", "right", "middle"],
+                       "description": "Mouse button for click. Default left."},
+            "text": {"type": "string",
+                     "description": "Text to type for the type verb."},
+            "keys": {"type": "string",
+                     "description": "Chord for the key verb, e.g. 'ctrl+s'."},
+            "app": {"type": "string",
+                    "description": "Substring match on application name (wait)."},
+            "name": {"type": "string",
+                     "description": "Substring match on window title (wait)."},
+            "role": {"type": "string",
+                     "description": "Substring match on AT-SPI role (wait)."},
+            "timeout": {"type": "number",
+                        "description": "Seconds to wait before reporting timeout."},
+            "out": {"type": "string",
+                    "description": "Where to write the screenshot (look)."},
         },
+        "required": ["action"],
     },
 }
 

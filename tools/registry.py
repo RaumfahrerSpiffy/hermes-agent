@@ -789,6 +789,25 @@ class ToolRegistry:
         owner = caller_owner or handler_owner
         if scope is None and owner is not None:
             scope = self._plugin_scope_of(owner)
+        # Reject a doubly-wrapped schema. `get_definitions()` adds the
+        # {"type": "function", "function": ...} envelope itself, so a schema
+        # that already carries it registers and DISPATCHES fine while the
+        # model receives an empty description and empty parameters — the tool
+        # is callable but undescribed, and `tool_describe` returns
+        # {"description": "", "parameters": {}}. MEASURED 2026-08-23 on the
+        # `screen` tool: nothing in the pipeline complained for two days.
+        # Warn rather than reject so a third-party plugin with this shape
+        # degrades instead of vanishing, but make it loud in agent.log.
+        if isinstance(schema, dict) and "function" in schema and "type" in schema:
+            logger.warning(
+                "Tool '%s': schema looks doubly-wrapped (has top-level 'type' "
+                "and 'function'). register() expects the BARE function object "
+                "— name/description/parameters at the top level; the "
+                "{'type': 'function', 'function': ...} envelope is added by "
+                "get_definitions(). The tool will dispatch but the model will "
+                "see an EMPTY description and EMPTY parameters.",
+                name,
+            )
         with self._lock:
             target = (
                 self._tools

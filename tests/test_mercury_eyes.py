@@ -762,17 +762,54 @@ def test_registration_is_top_level_and_discoverable():
 
 
 def test_tool_is_registered_with_the_expected_surface():
+    """Assert the EMITTED schema, not the registered dict.
+
+    The earlier version of this test read ``entry.schema["function"]``, which
+    only passes when the schema is doubly-wrapped — so it certified the very
+    defect it should have caught (MEASURED 2026-08-23: the tool dispatched
+    fine while the model saw an empty description and empty parameters).
+    ``get_definitions()`` is what the model actually receives, so that is what
+    gets asserted.
+    """
     from tools.registry import registry
     import tools.screen_tool  # noqa: F401  — import triggers registration
     entry = registry.get_entry("screen")
     assert entry is not None
     assert entry.toolset == "screen"
-    fn = entry.schema["function"]
+
+    defs = registry.get_definitions({"screen"})
+    assert defs, "screen produced no definition (check_fn false on this host?)"
+    fn = defs[0]["function"]
+    assert defs[0]["type"] == "function"
     assert fn["name"] == "screen"
+    assert len(fn["description"]) > 50, "description reached the model empty"
     verbs = set(fn["parameters"]["properties"]["action"]["enum"])
     assert verbs == {"look", "surfaces", "wait", "click", "type", "key",
                      "cursor"}
     assert fn["parameters"]["required"] == ["action"]
+
+
+def test_no_registered_tool_has_a_doubly_wrapped_schema():
+    """Whole-class guard: register() takes the BARE function object.
+
+    ``get_definitions()`` adds the {"type": "function", "function": ...}
+    envelope itself. A schema that already carries it registers and dispatches
+    without complaint while the model receives an empty description and empty
+    parameters. This asserts the invariant across every registered tool, so a
+    future tool cannot reintroduce the shape silently.
+    """
+    from tools.registry import registry, discover_builtin_tools
+    discover_builtin_tools()
+    offenders = [
+        name for name, entry in registry._tools.items()
+        if isinstance(entry.schema, dict)
+        and "function" in entry.schema
+        and "type" in entry.schema
+    ]
+    assert not offenders, (
+        f"doubly-wrapped tool schemas (model sees empty description and "
+        f"parameters): {sorted(offenders)}"
+    )
 
 
 # --- DPMS: the blank frame that was NOT a lock ------------------------------
