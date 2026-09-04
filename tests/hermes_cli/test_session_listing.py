@@ -135,3 +135,48 @@ class TestQuerySessionListingLaneScope:
         )
 
         assert [row["id"] for row in rows] == ["foreign_59"]
+
+
+class TestQuerySessionListingOrderByLastActive:
+    """Explicit order_by_last_active override (sessions-panel reorder-on-touch)."""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        # Created in this order: older -> newer by started_at/id.
+        db.create_session("sess_a", "telegram", user_id="1", chat_id="2")
+        db.set_session_title("sess_a", "Session A")
+        db.create_session("sess_b", "telegram", user_id="1", chat_id="2")
+        db.set_session_title("sess_b", "Session B")
+        # Touch sess_a AFTER sess_b was created, so its last activity is the
+        # most recent even though it was created first.
+        db.touch_session_activity("sess_a")
+        yield db
+        db.close()
+
+    def test_default_preserves_creation_order_without_search(self, db):
+        # No explicit order_by_last_active and no search_query -> historical
+        # behavior: creation order (newest-created first), NOT activity order.
+        rows = query_session_listing(db, source="telegram", include_unnamed=True)
+        assert [r["id"] for r in rows] == ["sess_b", "sess_a"]
+
+    def test_explicit_true_sorts_by_last_active(self, db):
+        # sess_a was touched after sess_b was created, so it must sort first
+        # when order_by_last_active is explicitly requested.
+        rows = query_session_listing(
+            db, source="telegram", include_unnamed=True, order_by_last_active=True,
+        )
+        assert [r["id"] for r in rows] == ["sess_a", "sess_b"]
+
+    def test_explicit_false_keeps_creation_order_even_with_search(self, db):
+        # A caller can force creation order even when searching.
+        rows = query_session_listing(
+            db,
+            source="telegram",
+            search_query="session",
+            include_unnamed=True,
+            order_by_last_active=False,
+        )
+        assert [r["id"] for r in rows] == ["sess_b", "sess_a"]

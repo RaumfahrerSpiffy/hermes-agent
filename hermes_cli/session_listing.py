@@ -53,6 +53,7 @@ def query_session_listing(
     search_query: str | None = None,
     limit: int = 10,
     exclude_sources: list[str] | None = None,
+    order_by_last_active: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Return session rows for interactive listing surfaces.
 
@@ -64,17 +65,26 @@ def query_session_listing(
     With ``search_query``, rows are filtered by title/id match (SQL-level, see
     ``SessionDB.list_sessions_rich``) and ordered by most-recent activity;
     unnamed sessions stay visible since an id match may be the only handle.
+
+    ``order_by_last_active`` controls sort order explicitly: ``True`` sorts by
+    most-recent activity (mirrors the desktop dashboard's "recent" order),
+    ``False`` sorts by original creation time. Leave it ``None`` (default) to
+    preserve the historical behavior — most-recent-activity order only when a
+    search query is present, creation order otherwise.
     """
     query_source = None if include_all_sources else source
     fetch_limit = max(limit * 4, limit)
     search = (search_query or "").strip()
+    effective_order_by_last_active = (
+        bool(search) if order_by_last_active is None else order_by_last_active
+    )
     rows = session_db.list_sessions_rich(
         source=query_source,
         session_key=session_key,
         exclude_sources=exclude_sources,
         limit=fetch_limit,
         search_query=search or None,
-        order_by_last_active=bool(search),
+        order_by_last_active=effective_order_by_last_active,
     )
     result: list[dict[str, Any]] = []
     for row in rows:

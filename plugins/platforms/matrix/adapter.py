@@ -3595,6 +3595,10 @@ class MatrixAdapter(BasePlatformAdapter):
                 include_unnamed=False,      # named sessions only — same as drawer
                 limit=limit,
                 exclude_sources=["tool"],
+                # Panel row order should track last activity (touching an old
+                # session bumps it to the top), not the original creation
+                # time — see MercuryTerm sessions-panel reordering request.
+                order_by_last_active=True,
             )
             sessions = [
                 {
